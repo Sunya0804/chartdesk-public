@@ -1198,49 +1198,36 @@ window.ChartDeskIndicators = (() => {
 		return STOCK_TOKENS.has(base) || (base.endsWith('X') && STOCK_TOKENS.has(base.slice(0, -1)));
 	}
 
-	function volumeZones(s, p, context = {}) {
+	// 짧은 주기의 전환점은 잡음이 많아 구간이 화면을 덮는다. 지지·저항은 한 단계 위 주기의 봉으로 찾는다.
+	const ZONE_BASIS_AUTO = { '1m': '1h', '5m': '1h', '15m': '4h', '30m': '4h', '1h': '1d' };
+	const ZONE_BASIS_CHOICES = [null, null, '1h', '4h', '1d'];
+	const ZONE_BASIS_ORDER = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'];
+	const ZONE_BASIS_NAMES = { '1h': '1시간봉', '4h': '4시간봉', '1d': '일봉' };
+
+	/** 지지·저항을 찾을 주기. 차트 주기와 같거나 짧으면 null(차트 봉을 그대로 쓴다). */
+	function zoneBasis(p, interval) {
+		const choice = Math.round(p.basis ?? 0);
+		const wanted = choice === 0 ? ZONE_BASIS_AUTO[interval] : ZONE_BASIS_CHOICES[choice];
+		if (!wanted || ZONE_BASIS_ORDER.indexOf(wanted) <= ZONE_BASIS_ORDER.indexOf(interval)) return null;
+		return wanted;
+	}
+
+	/** 전환점을 모아 지지·저항 구간을 만든다. 구간의 from·last는 봉 시간이다. */
+	function findZones(s, p, context) {
 		const from = p.bars > 0 ? Math.max(0, s.n - p.bars) : 0;
-		const out = { poc: blank(s.n), vah: blank(s.n), val: blank(s.n) };
-		if (s.n - from < 10) return out;
+		const result = { zones: [], skipWeekend: false, skipped: 0 };
+		if (s.n - from < 10) return result;
 		let low = Infinity;
 		let high = -Infinity;
+		let sum = 0;
+		const hasVolume = s.v.slice(from).some(volume => volume > 0);
+		const weight = i => (hasVolume ? s.v[i] : 1);
 		for (let i = from; i < s.n; i++) {
 			low = Math.min(low, s.l[i]);
 			high = Math.max(high, s.h[i]);
+			sum += weight(i);
 		}
-		if (!(high > low)) return out;
-
-		// 매물대: 봉마다 거래량을 그 봉의 저가~고가에 고르게 나눠 가격 칸에 쌓는다.
-		const rows = Math.max(10, Math.min(200, Math.round(p.rows)));
-		const step = (high - low) / rows;
-		// 거래량이 없는 종목(지수·환율)은 봉 하나를 1로 쳐서 머문 시간을 대신 쌓는다.
-		const hasVolume = s.v.slice(from).some(volume => volume > 0);
-		const weight = i => (hasVolume ? s.v[i] : 1);
-		const up = new Array(rows).fill(0);
-		const down = new Array(rows).fill(0);
-		for (let i = from; i < s.n; i++) {
-			const first = Math.min(rows - 1, Math.floor((s.l[i] - low) / step));
-			const last = Math.min(rows - 1, Math.floor((s.h[i] - low) / step));
-			const share = weight(i) / (last - first + 1);
-			const side = s.c[i] >= s.o[i] ? up : down;
-			for (let row = first; row <= last; row++) side[row] += share;
-		}
-		const totals = up.map((value, row) => value + down[row]);
-		const sum = totals.reduce((a, b) => a + b, 0);
-		let pocRow = 0;
-		for (let row = 1; row < rows; row++) {
-			if (totals[row] > totals[pocRow]) pocRow = row;
-		}
-		// 가장 많이 거래된 칸에서 위아래로 넓혀 가며 전체의 일정 비율이 담기는 범위(밸류 에어리어)를 구한다.
-		let bottom = pocRow;
-		let top = pocRow;
-		let inside = totals[pocRow];
-		while (inside < sum * p.area / 100 && (bottom > 0 || top < rows - 1)) {
-			const below = bottom > 0 ? totals[bottom - 1] : -1;
-			const above = top < rows - 1 ? totals[top + 1] : -1;
-			if (above >= below) inside += totals[++top];
-			else inside += totals[--bottom];
-		}
+		if (!(high > low)) return result;
 
 		// 지지·저항: 앞뒤 봉보다 높거나 낮은 전환점을 모아, 가까운 가격끼리 한 구간으로 묶는다.
 		const span = Math.max(2, Math.round(p.pivot));
@@ -1250,6 +1237,7 @@ window.ChartDeskIndicators = (() => {
 		const tolerance = (ranges[s.n - 1] ?? (high - low) * 0.01) * 0.6;
 		// 주식 선물 토큰은 주말 전환점을 뺀다. 평소의 두 배가 넘는 움직임이나 거래량이 나온 봉만 남긴다.
 		const skipWeekend = p.weekend === 1 || (p.weekend === 0 && isStockToken(context.info));
+		result.skipWeekend = skipWeekend;
 		const quietWeekend = (i) => {
 			if (!skipWeekend) return false;
 			const day = new Date((s.t[i] - (context.tzOffset ?? 0)) * 1000).getUTCDay();
@@ -1259,7 +1247,6 @@ window.ChartDeskIndicators = (() => {
 			return !bigMove && !bigVolume;
 		};
 		const pivots = [];
-		let skipped = 0;
 		for (let i = Math.max(from, span); i < s.n - span; i++) {
 			let isHigh = true;
 			let isLow = true;
@@ -1269,7 +1256,7 @@ window.ChartDeskIndicators = (() => {
 			}
 			if (!isHigh && !isLow) continue;
 			if (quietWeekend(i)) {
-				skipped++;
+				result.skipped++;
 				continue;
 			}
 			// 그 봉의 거래량이 평소의 몇 배였는지. 거래가 터지며 돌아선 자리일수록 무겁게 본다.
@@ -1291,12 +1278,12 @@ window.ChartDeskIndicators = (() => {
 			}
 			else groups.push({ low: pivot.price, high: pivot.price, touches: 1, burst: pivot.burst, from: pivot.index, last: pivot.index });
 		}
-		const close = s.c[s.n - 1];
+		const close = context.close ?? s.c[s.n - 1];
 		const zones = groups
 			.filter(group => group.touches >= 2)
 			.map((group) => {
 				const pad = tolerance * 0.15;
-				const zone = { low: group.low - pad, high: group.high + pad, touches: group.touches, from: group.from, last: group.last };
+				const zone = { low: group.low - pad, high: group.high + pad, touches: group.touches, from: s.t[group.from], last: s.t[group.last] };
 				// 구간 안을 잘게 나눠 어느 가격에 거래가 몰렸는지 본다.
 				const cellStep = (zone.high - zone.low) / ZONE_CELLS;
 				const cells = new Array(ZONE_CELLS).fill(0);
@@ -1330,15 +1317,115 @@ window.ChartDeskIndicators = (() => {
 				zone.kind = close > zone.high ? 'support' : close < zone.low ? 'resistance' : 'inside';
 				return zone;
 			})
-			.sort((a, b) => b.reliability - a.reliability)
-			.slice(0, Math.max(1, Math.round(p.zones)));
+			.sort((a, b) => b.reliability - a.reliability);
+		// 신뢰도 순으로 고르되, 현재가 위(저항)와 아래(지지)를 각각 절반까지만 둔다.
+		// 한쪽에 몰려 화면을 덮지 않고, 가격이 지금 만날 수 있는 양쪽 구간이 함께 남는다.
+		const limit = Math.max(1, Math.round(p.zones));
+		const perSide = Math.ceil(limit / 2);
+		const taken = { support: 0, resistance: 0, inside: 0 };
+		for (const zone of zones) {
+			if (result.zones.length >= limit) break;
+			if (zone.kind === 'inside' ? taken.inside >= 1 : taken[zone.kind] >= perSide) continue;
+			taken[zone.kind]++;
+			result.zones.push(zone);
+		}
+		return result;
+	}
+
+	function volumeZones(s, p, context = {}) {
+		const from = p.bars > 0 ? Math.max(0, s.n - p.bars) : 0;
+		const out = { poc: blank(s.n), vah: blank(s.n), val: blank(s.n) };
+		if (s.n - from < 10) return out;
+		let low = Infinity;
+		let high = -Infinity;
+		for (let i = from; i < s.n; i++) {
+			low = Math.min(low, s.l[i]);
+			high = Math.max(high, s.h[i]);
+		}
+		if (!(high > low)) return out;
+
+		// 매물대: 봉마다 거래량을 그 봉의 저가~고가에 고르게 나눠 가격 칸에 쌓는다. 차트에 보이는 봉으로 만든다.
+		const rows = Math.max(10, Math.min(200, Math.round(p.rows)));
+		const step = (high - low) / rows;
+		// 거래량이 없는 종목(지수·환율)은 봉 하나를 1로 쳐서 머문 시간을 대신 쌓는다.
+		const hasVolume = s.v.slice(from).some(volume => volume > 0);
+		const weight = i => (hasVolume ? s.v[i] : 1);
+		const up = new Array(rows).fill(0);
+		const down = new Array(rows).fill(0);
+		for (let i = from; i < s.n; i++) {
+			const first = Math.min(rows - 1, Math.floor((s.l[i] - low) / step));
+			const last = Math.min(rows - 1, Math.floor((s.h[i] - low) / step));
+			const share = weight(i) / (last - first + 1);
+			const side = s.c[i] >= s.o[i] ? up : down;
+			for (let row = first; row <= last; row++) side[row] += share;
+		}
+		const totals = up.map((value, row) => value + down[row]);
+		const sum = totals.reduce((a, b) => a + b, 0);
+		let pocRow = 0;
+		for (let row = 1; row < rows; row++) {
+			if (totals[row] > totals[pocRow]) pocRow = row;
+		}
+		// 가장 많이 거래된 칸에서 위아래로 넓혀 가며 전체의 일정 비율이 담기는 범위(밸류 에어리어)를 구한다.
+		let bottom = pocRow;
+		let top = pocRow;
+		let inside = totals[pocRow];
+		while (inside < sum * p.area / 100 && (bottom > 0 || top < rows - 1)) {
+			const below = bottom > 0 ? totals[bottom - 1] : -1;
+			const above = top < rows - 1 ? totals[top + 1] : -1;
+			if (above >= below) inside += totals[++top];
+			else inside += totals[--bottom];
+		}
+
+		// 지지·저항은 위 주기의 봉이 있으면 그것으로, 아직 받지 못했거나 필요 없으면 차트 봉으로 찾는다.
+		const basis = context.basis;
+		const close = s.c[s.n - 1];
+		const useBasis = basis?.source && basis.source.n >= 10;
+		const found = basis?.loading
+			? { zones: [], skipWeekend: false, skipped: 0 }
+			: findZones(useBasis ? basis.source : s, p, { ...context, close });
+		// 구간의 시작 시간을 차트의 봉 번호로 바꾼다. 차트보다 앞선 구간은 왼쪽 끝부터 그린다.
+		const indexAt = (time) => {
+			let lo = 0;
+			let hi = s.n - 1;
+			while (lo < hi) {
+				const mid = (lo + hi) >> 1;
+				if (s.t[mid] < time) lo = mid + 1;
+				else hi = mid;
+			}
+			return lo;
+		};
+		// 위 주기의 구간은 그 주기의 봉 폭만큼 두꺼워 짧은 차트에서는 화면을 덮는다.
+		// 구간 안에서 거래가 몰린 부분(가장 진한 칸의 60% 이상인 이웃 칸)만 남기고, 폭은 차트 봉 평균 변동폭(ATR)의 2배까지로 줄인다.
+		const chartRange = useBasis ? atr(s, 14)[s.n - 1] : null;
+		const narrow = (zone) => {
+			if (!useBasis || !chartRange) return zone;
+			const peak = zone.cells.indexOf(1);
+			let first = peak;
+			let last = peak;
+			while (first > 0 && zone.cells[first - 1] >= 0.6) first--;
+			while (last < zone.cells.length - 1 && zone.cells[last + 1] >= 0.6) last++;
+			const cellStep = (zone.high - zone.low) / zone.cells.length;
+			let low = zone.low + first * cellStep;
+			let high = zone.low + (last + 1) * cellStep;
+			let cells = zone.cells.slice(first, last + 1);
+			const cap = chartRange * 2;
+			if (high - low > cap) {
+				low = Math.max(low, zone.core - cap / 2);
+				high = Math.min(high, zone.core + cap / 2);
+				cells = [1];
+			}
+			const kind = close > high ? 'support' : close < low ? 'resistance' : 'inside';
+			return { ...zone, low, high, cells, kind, fullLow: zone.low, fullHigh: zone.high };
+		};
+		const zones = found.zones.map(zone => narrow({ ...zone, from: indexAt(zone.from), last: indexAt(zone.last) }));
 
 		const level = value => s.c.map((unused, i) => (i >= from ? value : null));
 		return {
 			poc: level(low + step * (pocRow + 0.5)),
 			vah: level(low + step * (top + 1)),
 			val: level(low + step * bottom),
-			$draw: { from, low, step, up, down, peak: totals[pocRow], pocRow, bottom, top, zones, hasVolume, skipWeekend, skipped },
+			$draw: { from, low, step, up, down, peak: totals[pocRow], pocRow, bottom, top, zones, hasVolume, skipWeekend: found.skipWeekend, skipped: found.skipped,
+				basis: useBasis ? ZONE_BASIS_NAMES[basis.interval] ?? basis.interval : null, loading: basis?.loading === true },
 		};
 	}
 
@@ -1384,7 +1471,7 @@ window.ChartDeskIndicators = (() => {
 				context.lineTo(right, core);
 				context.stroke();
 			}
-			const name = zone.kind === 'support' ? '지지' : zone.kind === 'resistance' ? '저항' : '현재가 구간';
+			const name = `${ zone.kind === 'support' ? '지지' : zone.kind === 'resistance' ? '저항' : '현재가 구간' }${ data.basis ? ` (${ data.basis })` : '' }`;
 			context.fillStyle = tint(color, 0.6 + 0.4 * zone.reliability);
 			context.textAlign = 'right';
 			context.fillText(`${ name } ${ view.formatPrice(zone.low) } ~ ${ view.formatPrice(zone.high) } · 신뢰도 ${ Math.round(zone.reliability * 100) }% · ${ zone.touches }회 · 거래 ${ (zone.share * 100).toFixed(0) }% · 핵심 ${ view.formatPrice(zone.core) }`,
@@ -1423,11 +1510,12 @@ window.ChartDeskIndicators = (() => {
 			num('area', '밸류 에어리어 %', 70, 10, 1),
 			num('size', '매물대 폭 (차트의 %)', 10, 3, 1),
 			num('pivot', '전환점 좌우 봉 수', 5, 2, 1),
-			num('zones', '지지·저항 구간 수', 6, 1, 1),
+			num('zones', '지지·저항 구간 수 (위·아래 절반씩)', 6, 1, 1),
+			num('basis', '지지·저항 기준 주기 (0 자동 · 1 차트 주기 · 2 1시간 · 3 4시간 · 4 일봉)', 0, 0, 1),
 			num('weekend', '주말 전환점 제외 (0 주식 토큰만 · 1 항상 · 2 안 함)', 0, 0, 1),
 		],
 		[line('poc', 'POC', '#f5a623', { width: 2 }), line('vah', 'VAH', '#a855f7'), line('val', 'VAL', '#a855f7')],
-		volumeZones, { draw: drawVolumeZones, axisLabel: true, group: 'personal' }));
+		volumeZones, { draw: drawVolumeZones, axisLabel: true, group: 'personal', basis: zoneBasis }));
 
 	// ---------- ICT (시장 구조, 오더블록, FVG, 유동성, 프리미엄·디스카운트) ----------
 	// ICT에서 쓰는 개념을 봉 데이터만으로 기계적으로 찾는다. 재량 판단을 대신하지는 못한다.

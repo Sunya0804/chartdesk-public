@@ -402,6 +402,35 @@
 		return decimals < 2 && top < 1000 ? 2 : decimals;
 	}
 
+	// 지표가 위 주기의 봉을 필요로 할 때(매물대·지지저항의 지지·저항) 받아 두는 곳. 종목·주기마다 하나, 5분이 지나면 다시 받는다.
+	const basisBars = new Map();
+	const BASIS_FRESH_MS = 5 * 60 * 1000;
+
+	/** 위 주기의 봉. 받는 중이면 loading, 받지 못했으면 source가 null이다. 다 받으면 onReady를 부른다. */
+	function basisFor(symbol, interval, onReady) {
+		const key = `${ symbol }|${ interval }`;
+		let entry = basisBars.get(key);
+		if (!entry || (!entry.loading && Date.now() - entry.at > BASIS_FRESH_MS)) {
+			entry = { at: Date.now(), loading: true, source: entry?.source ?? null, waiting: new Set() };
+			const current = entry;
+			basisBars.set(key, current);
+			loadBars(symbol, interval)
+				.then(({ bars }) => {
+					current.source = IND.source(bars);
+				})
+				.catch(() => {})
+				.finally(() => {
+					current.loading = false;
+					current.at = Date.now();
+					const waiting = [...current.waiting];
+					current.waiting.clear();
+					waiting.forEach(callback => callback());
+				});
+		}
+		if (entry.loading) entry.waiting.add(onReady);
+		return { interval, source: entry.source, loading: entry.loading && !entry.source };
+	}
+
 	/** 봉을 받아 차트 시간(현지 시각 기준)으로 바꾼다. */
 	async function loadBars(id, interval, endMs, limit) {
 		const { provider, code } = PROV.resolve(id);
@@ -1990,8 +2019,18 @@
 
 		computeIndicators() {
 			const source = IND.source(this.bars);
-			const context = { tzOffset: TZ_OFFSET, symbol: this.cfg.symbol, info: symbolInfo(this.cfg.symbol) };
-			for (const ind of this.inds) ind.out = ind.def.calc(source, ind.cfg.params, context);
+			const context = { tzOffset: TZ_OFFSET, symbol: this.cfg.symbol, interval: this.cfg.interval, info: symbolInfo(this.cfg.symbol) };
+			// 위 주기의 봉이 도착하면 지표를 다시 계산한다.
+			this.basisReady ??= () => {
+				if (this.dead || this.bars.length === 0) return;
+				this.setIndicatorData();
+				this.layer.redraw();
+			};
+			for (const ind of this.inds) {
+				const wanted = ind.def.basis?.(ind.cfg.params, this.cfg.interval);
+				const own = wanted ? { ...context, basis: basisFor(this.cfg.symbol, wanted, this.basisReady) } : context;
+				ind.out = ind.def.calc(source, ind.cfg.params, own);
+			}
 		}
 
 		setIndicatorData() {
