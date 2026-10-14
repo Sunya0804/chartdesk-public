@@ -1322,19 +1322,25 @@ window.ChartDeskIndicators = (() => {
 				return zone;
 			})
 			.sort((a, b) => b.reliability - a.reliability);
-		// 신뢰도 순으로 고르되, 현재가 위(저항)와 아래(지지)를 각각 절반까지만 둔다.
-		// 한쪽에 몰려 화면을 덮지 않고, 가격이 지금 만날 수 있는 양쪽 구간이 함께 남는다.
-		// 이미 고른 구간과 ATR 2.5배 안으로 붙은 구간은 같은 자리로 보고 버린다(겹쳐 쌓이지 않게).
 		// 최소 신뢰도에 못 미치거나 닿은 횟수가 3번이 안 되는 구간은 그리지 않는다.
-		const limit = Math.max(1, Math.round(p.zones));
-		const perSide = Math.ceil(limit / 2);
+		// 신뢰도 순으로 보며, 이미 남긴 구간과 ATR 2.5배 안으로 붙은 구간은 같은 자리로 보고 버린다(겹쳐 쌓이지 않게).
 		const floor = (p.minrel ?? 50) / 100;
 		const gap = unit * 2.5;
-		const taken = { support: 0, resistance: 0, inside: 0 };
+		const apart = [];
 		for (const zone of zones) {
-			if (result.zones.length >= limit || zone.reliability < floor) break;
+			if (zone.reliability < floor) break;
 			if (zone.touches < 3) continue;
-			if (result.zones.some(other => zone.low - other.high < gap && other.low - zone.high < gap)) continue;
+			if (apart.some(other => zone.low - other.high < gap && other.low - zone.high < gap)) continue;
+			apart.push(zone);
+		}
+		// 현재가 위(저항)와 아래(지지)에서 각각 절반까지, 현재가에 가까운 구간부터 둔다.
+		// 신뢰도만 보면 멀리 떨어진 오래된 구간이 자리를 차지해 짧은 차트 화면에는 하나도 안 보인다.
+		const limit = Math.max(1, Math.round(p.zones));
+		const perSide = Math.ceil(limit / 2);
+		const distance = zone => Math.max(zone.low - close, close - zone.high, 0);
+		const taken = { support: 0, resistance: 0, inside: 0 };
+		for (const zone of apart.sort((a, b) => distance(a) - distance(b))) {
+			if (result.zones.length >= limit) break;
 			if (zone.kind === 'inside' ? taken.inside >= 1 : taken[zone.kind] >= perSide) continue;
 			taken[zone.kind]++;
 			result.zones.push(zone);
