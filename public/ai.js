@@ -220,7 +220,76 @@
 		'너는 차트 프로그램 ChartDesk 안에서 일하는 시장 분석 도우미다. 한국어로 답한다.',
 		'사용자가 지금 화면에 띄워 둔 차트의 요약이 아래에 붙는다. 질문이 차트와 관련되면 이 자료를 근거로 답하고, 자료에 없는 수치는 지어내지 않는다.',
 		'가격 수준을 말할 때는 반드시 숫자를 적는다. 불확실한 것은 불확실하다고 말한다.',
-		'특정 매매를 지시하지 않는다. 판단에 필요한 근거, 시나리오, 무효화 조건을 제시한다.',
+		'매매 결정은 사용자가 한다. 사용자가 의견을 요청하면(총정리, 포지션 점검 등) 추천 여부와 가격 계획을 분명히 제시하되, 근거와 틀렸을 때의 기준을 함께 준다. 요청하지 않았으면 근거, 시나리오, 무효화 조건 위주로 답한다.',
+	].join('\n');
+
+	const SUMMARY = [
+		'지금 차트에 띄워 둔 종목을 총정리해 줘. 아래 [차트 자료]만 근거로 삼고, 자료에 없는 사실은 지어내지 마.',
+		'제목, 서론, 면책 문구 없이 아래 형식의 줄만 써.',
+		'',
+		'첫 줄: 판단 하나와 이유 한 구절. 판단은 "매수 고려 / 관망 / 매도·비중 축소 고려" 중 하나. 예: "관망 — 81,860 저항 아래에서 거래량 없이 횡보 중"',
+		'그 아래 3~5줄, 각 줄은 "항목: 가격 (근거)" 형식으로:',
+		'- 진입: 들어가기 좋은 가격(또는 가격대)과 조건. 예: 지지 확인 후, 종가 돌파 시',
+		'- 손절: 종가로 이탈하면 판단이 틀린 것으로 보는 가격과 진입가 대비 %',
+		'- 추가매수: 계획된 분할로 더 담을 가격과 조건. 손실을 메우려는 물타기가 되는 자리면 넣지 말고 "없음"',
+		'- 목표: 1차·2차 목표 가격과 진입가 대비 %',
+		'- 주의: 이 계획을 흔들 변수 하나(큰 저항, 뉴스, 변동성 등)',
+		'',
+		'규칙:',
+		'- 판단이 관망이면 진입 줄에 "어디까지 오면 다시 볼지"를 적어. 매도·비중 축소 고려면 같은 형식을 숏 또는 비중 축소 기준으로 써.',
+		'- 손익비(목표 1차까지 거리 ÷ 손절까지 거리)가 1.5보다 작으면 판단을 관망으로 낮추고 그 이유를 첫 줄에 적어.',
+		'- 손절은 가까운 지지·저항 바깥, ATR의 0.5~1배 여유를 두고 잡아.',
+		'- 모든 가격은 숫자로. 확률 숫자는 지어내지 마. 마지막 줄 끝에 괄호로 자료 기준 시각을 적어.',
+	].join('\n');
+
+	const NEWS = [
+		'아래 [차트 자료]의 최근 뉴스를 정리해 줘. 뉴스는 제목만 있고 본문은 없으니, 제목에서 읽을 수 있는 것만 말하고 없는 내용은 지어내지 마.',
+		'',
+		'## 한 줄 요약',
+		'지금 뉴스 흐름이 이 종목에 호재 쪽인지, 악재 쪽인지, 섞여 있는지.',
+		'',
+		'## 주요 뉴스',
+		'영향이 큰 순서로 최대 7개. 같은 사건을 다룬 기사는 하나로 묶어. 각 줄: "날짜 · 내용 요약 — 호재/악재/중립 — 이유 한 줄".',
+		'',
+		'## 가격과 맞춰 보기',
+		'뉴스가 나온 날짜 전후로 봉 표(일봉, 현재 주기)에서 가격과 거래량이 실제로 반응했는지. 이미 가격에 반영된 것으로 보이는 뉴스와 아직 반응이 없는 뉴스를 나눠.',
+		'',
+		'## 확인할 것',
+		'제목만으로는 판단하기 어려워 원문·공시·일정으로 확인해야 할 것 2~4개.',
+		'',
+		'뉴스가 없거나 이 종목과 관련이 적으면 그렇다고 짧게 말하고 끝내.',
+	].join('\n');
+
+	const POSITION = [
+		'내가 들고 있는(또는 들어가려는) 포지션을 지금 차트 기준으로 점검해 줘. 포지션 정보는 아래 [내 메모]에 적었어(평단, 수량이나 비중, 롱/숏, 레버리지 등).',
+		'[내 메모]가 없거나 평단·방향을 알 수 없으면 점검하지 말고, 무엇을 알려 줘야 하는지 한 줄로만 물어봐.',
+		'',
+		'## 지금 상태',
+		'평단 대비 현재 손익 %(레버리지가 있으면 반영한 값도), 가까운 지지·저항 사이에서 지금 가격의 위치.',
+		'',
+		'## 손절과 익절',
+		'손절 가격과 그 근거, 1차·2차 익절 가격과 근거. 각각 평단 대비 %.',
+		'',
+		'## 추가매수 또는 비중 축소',
+		'계획된 분할 매수를 할 가격과 조건, 또는 일부 정리할 가격. 손실 중인 포지션의 물타기가 되는 경우에는 그 위험을 먼저 적어.',
+		'',
+		'## 한 줄 결론',
+		'"유지 / 일부 정리 / 정리" 중 어디에 가까운지와 이유. 모든 가격은 숫자로.',
+	].join('\n');
+
+	const EASY = [
+		'차트를 처음 보는 사람도 이해할 수 있게 지금 차트를 설명해 줘. 전문 용어는 처음 나올 때 괄호로 쉽게 풀어 줘. 아래 [차트 자료]의 숫자를 그대로 써서 설명해.',
+		'',
+		'## 지금 어떤 상황인가',
+		'세 줄 이내로. 오르는 중인지, 내리는 중인지, 옆으로 가는 중인지.',
+		'',
+		'## 화면에서 볼 곳',
+		'이동평균선, 지지·저항, 거래량, RSI를 하나씩, 지금 값과 그 값이 뜻하는 것을 두세 줄로.',
+		'',
+		'## 다음에 볼 신호',
+		'앞으로 이런 일이 생기면 상황이 바뀐다는 신호 2~3개를 가격과 함께.',
+		'',
+		'사고팔라는 권유는 하지 마.',
 	].join('\n');
 
 	const BRIEFING = [
@@ -309,10 +378,21 @@
 		'작성 규칙: 모든 가격은 숫자로 적고 근거 자료를 괄호로 붙여. 매수·매도를 지시하지 마. 위 통계는 2018~2021년 비트코인·이더리움 선물의 것이므로, 지금 종목이 다르면 그대로 적용하기 어렵다는 점을 맨 앞에 한 줄로 밝혀. 마지막 줄에 자료 기준 시각을 적어.',
 	].join('\n');
 
+	// memo가 있는 요청은 입력창에 적은 글을 [내 메모]로 붙여 보낸다.
 	const PROMPTS = {
-		brief: { name: '종목 브리핑', web: '브리핑을 웹에서', text: BRIEFING },
-		wonyo: { name: 'GOSU식 매매 점검', web: '점검을 웹에서', text: WONYO },
+		summary: { name: '총정리', button: '총정리 요청', web: '총정리를 웹에서', text: SUMMARY },
+		brief: { name: '종목 브리핑', button: '종목 브리핑', web: '브리핑을 웹에서', text: BRIEFING },
+		news: { name: '뉴스 정리', button: '뉴스 정리', web: '뉴스 정리를 웹에서', text: NEWS },
+		position: { name: '내 포지션 점검', button: '포지션 점검', web: '점검을 웹에서', text: POSITION,
+			memo: '평단, 수량(또는 비중), 롱/숏, 레버리지를 적고 "포지션 점검"을 누르세요. 예: 롱 평단 80,500, 0.2 BTC, 3배' },
+		easy: { name: '차트 쉽게 설명', button: '쉽게 설명', web: '설명을 웹에서', text: EASY },
+		wonyo: { name: 'GOSU식 매매 점검', button: '점검 요청', web: '점검을 웹에서', text: WONYO },
 	};
+
+	/** 고른 요청의 본문. 입력창에 글이 있으면 [내 메모]로 붙인다. */
+	function promptText(prompt, memo) {
+		return memo.trim() ? `${ prompt.text }\n\n[내 메모]\n${ memo.trim() }` : prompt.text;
+	}
 
 	// ---------- 응답 읽기 ----------
 
@@ -437,8 +517,8 @@
 	const body = el('div', { class: 'ai-body' });
 	const input = el('textarea', { rows: '2', placeholder: '차트에 대해 물어보세요. Enter로 보내고 Shift+Enter로 줄을 바꿉니다.', spellcheck: 'false' });
 	const sendButton = el('button', { class: 'primary', text: '보내기' });
-	const briefButton = el('button', { class: 'text-btn', text: '종목 브리핑', title: '지금 띄워 둔 종목의 지지·저항, 거래량, 이동평균선, 최근 뉴스를 정리해 달라고 요청합니다' });
-	const webButton = el('button', { class: 'text-btn', text: '브리핑을 웹에서', title: 'API 키 없이 쓰는 방법: 브리핑 프롬프트를 복사하고 고른 서비스의 웹 창을 엽니다. 그 창에 붙여 넣어(Ctrl+V) 직접 보내면 본인 계정으로 답을 받습니다.' });
+	const briefButton = el('button', { class: 'text-btn' });
+	const webButton = el('button', { class: 'text-btn', text: '브리핑을 웹에서', title: 'API 키 없이 쓰는 방법: 고른 요청의 프롬프트를 복사하고 고른 서비스의 웹 창을 엽니다. 그 창에 붙여 넣어(Ctrl+V) 직접 보내면 본인 계정으로 답을 받습니다.' });
 	const kindSelect = el('select', { class: 'ai-kind', title: '정해 둔 요청 고르기' }, ...Object.entries(PROMPTS).map(([id, prompt]) => el('option', { value: id, text: prompt.name })));
 	const clearButton = el('button', { class: 'text-btn', text: '새 대화' });
 	const keysButton = el('button', { class: 'text-btn', text: '계정 연결' });
@@ -476,11 +556,18 @@
 		})));
 	}
 
+	// 계정(CLI)으로 쓸 때 별칭은 무엇을 뜻하는지 붙여 보여 준다.
+	const MODEL_NOTES = {
+		opus: '최신 Opus', sonnet: '최신 Sonnet', haiku: '최신 Haiku', default: 'Codex 기본 모델', auto: '자동 선택',
+		'claude-fable-5-1': '사용 크레딧 필요', 'claude-fable-5': '사용 크레딧 필요',
+	};
+	const modelLabel = id => (via(settings.provider) === 'account' && MODEL_NOTES[id] ? `${ id } (${ MODEL_NOTES[id] })` : id);
+
 	function renderModels() {
 		const list = modelLists.get(listKey(settings.provider)) ?? [];
 		const model = currentModel();
 		const ids = model && !list.includes(model) ? [model, ...list] : list;
-		modelSelect.replaceChildren(...(ids.length ? ids : ['']).map(id => el('option', { value: id, text: id || '모델 목록 없음' })));
+		modelSelect.replaceChildren(...(ids.length ? ids : ['']).map(id => el('option', { value: id, text: id ? modelLabel(id) : '모델 목록 없음' })));
 		modelSelect.value = model;
 		modelSelect.disabled = ids.length === 0;
 	}
@@ -674,7 +761,7 @@
 				return;
 			}
 			const prompt = PROMPTS[kindSelect.value];
-			const content = `${ prompt.text }\n\n[차트 자료]\n${ context.text }`;
+			const content = `${ promptText(prompt, input.value) }\n\n[차트 자료]\n${ context.text }`;
 			const copied = await copyText(content);
 			messages.push({ role: 'web', provider: provider.id, content, copied, label: `웹으로 ${ prompt.name } · ${ context.shot.title } (${ context.shot.intervalLabel })` });
 			showingKeys = false;
@@ -694,7 +781,7 @@
 			return;
 		}
 		const pinned = body.scrollTop + body.clientHeight >= body.scrollHeight - 40;
-		body.replaceChildren(...(messages.length ? messages.map(bubble) : [el('p', { class: 'hint', text: '"종목 브리핑"을 누르면 지금 차트의 지지·저항, 거래량, 이동평균선, 최근 뉴스를 정리해 줍니다. 자유롭게 질문해도 됩니다. 보내는 질문마다 현재 차트 요약이 함께 전달됩니다.' })]));
+		body.replaceChildren(...(messages.length ? messages.map(bubble) : [el('p', { class: 'hint', text: '아래 목록에서 요청(총정리, 종목 브리핑, 뉴스 정리, 내 포지션 점검, 차트 쉽게 설명, GOSU식 매매 점검)을 고르고 옆 버튼을 누르면 지금 차트 자료를 붙여 보냅니다. 입력창에 적은 글은 [내 메모]로 함께 갑니다. 자유롭게 질문해도 됩니다. 보내는 질문마다 현재 차트 요약이 함께 전달됩니다.' })]));
 		if (pinned) body.scrollTop = body.scrollHeight;
 	}
 
@@ -804,16 +891,24 @@
 		settings.models[listKey(settings.provider)] = modelSelect.value;
 		saveSettings();
 	});
+	const askPlaceholder = input.placeholder;
 	const showKind = () => {
-		briefButton.textContent = kindSelect.value === 'brief' ? '종목 브리핑' : '점검 요청';
-		webButton.textContent = PROMPTS[kindSelect.value].web;
+		const prompt = PROMPTS[kindSelect.value];
+		briefButton.textContent = prompt.button;
+		briefButton.title = `${ prompt.name }: 지금 차트 자료를 붙여 요청합니다. 입력창에 글을 적어 두면 [내 메모]로 함께 보냅니다.`;
+		webButton.textContent = prompt.web;
+		input.placeholder = prompt.memo ?? askPlaceholder;
 	};
+	showKind();
 	kindSelect.addEventListener('change', showKind);
 	sendButton.addEventListener('click', submit);
 	briefButton.addEventListener('click', () => {
 		const shot = APP.snapshot();
 		const prompt = PROMPTS[kindSelect.value];
-		if (shot) send(prompt.text, `${ prompt.name } 요청 · ${ shot.title } (${ shot.intervalLabel })`, true);
+		if (!shot) return;
+		const memo = input.value;
+		input.value = '';
+		send(promptText(prompt, memo), `${ prompt.name } 요청 · ${ shot.title } (${ shot.intervalLabel })${ memo.trim() ? ` · 메모: ${ memo.trim() }` : '' }`, true);
 	});
 	webButton.addEventListener('click', briefOnWeb);
 	clearButton.addEventListener('click', () => {

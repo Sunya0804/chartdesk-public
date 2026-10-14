@@ -173,7 +173,15 @@ const accounts = {
         return { loggedIn: false };
       }
     },
-    models: async () => ["opus", "sonnet", "haiku"],
+    // 별칭(opus·sonnet·haiku)은 늘 최신 버전을 가리킨다. 버전을 고정하려면 아래 ID를 고른다.
+    // Fable은 구독 한도가 아니라 사용 크레딧이 있어야 쓸 수 있다.
+    models: async () => [
+      "opus", "sonnet", "haiku",
+      "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+      "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+      "claude-haiku-5-5", "claude-haiku-4-5",
+      "claude-fable-5-1", "claude-fable-5",
+    ],
     // 도구는 모두 끄고, 설정·MCP·CLAUDE.md를 읽지 않도록 빈 폴더에서 돌린다.
     run: ({ model, systemFile, messages }) => ({
       args: [
