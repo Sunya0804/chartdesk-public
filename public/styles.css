@@ -780,6 +780,8 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 /* 테마 고르기 */
 .popover .theme-option { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; justify-content: flex-start; }
 .popover .theme-option.on { color: var(--accent); }
+.popover .menu-option { display: block; width: 100%; padding: 6px 8px; text-align: left; }
+.popover .version { margin: 8px 2px 0; color: var(--muted); font-size: 12px; }
 .theme-chips { display: flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; flex: none; }
 .theme-chips i { width: 14px; height: 18px; display: block; }
 

@@ -1,10 +1,55 @@
 {
   "name": "chartdesk",
-  "version": "0.1.0",
+  "productName": "ChartDesk",
+  "version": "1.0.0",
   "private": true,
   "description": "개인용 실시간 차트 워크스페이스",
+  "author": "Sunya0804",
+  "license": "UNLICENSED",
+  "repository": "github:Sunya0804/chartdesk-public",
   "type": "module",
+  "main": "desktop/main.mjs",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "app": "electron .",
+    "dist": "electron-builder --win --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  },
+  "devDependencies": {
+    "electron": "44.7.2",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.sunya0804.chartdesk",
+    "productName": "ChartDesk",
+    "files": [
+      "server.mjs",
+      "public/**",
+      "desktop/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "desktop/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "ChartDesk-Setup-${version}.${ext}",
+      "shortcutName": "ChartDesk"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Sunya0804",
+        "repo": "chartdesk-public",
+        "releaseType": "release"
+      }
+    ]
   }
 }

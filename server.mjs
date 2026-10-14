@@ -1,12 +1,13 @@
 // 정적 파일과, 브라우저에서 직접 부를 수 없는 주소(시세, AI)를 대신 불러 주는 로컬 서버. 외부 의존성 없음.
 import { createServer } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
-import { extname, join, normalize, sep } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const home = fileURLToPath(new URL(".", import.meta.url));
 const root = join(home, "public");
-const port = Number(process.env.PORT ?? 5173);
+// startServer가 정한다. AI 요청의 출처 확인에 쓴다.
+let port = 0;
 const types = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -57,7 +58,8 @@ async function proxy(target, res) {
 // ---------- AI ----------
 // API 키는 이 컴퓨터의 ai-keys.json에만 두고 브라우저로 돌려보내지 않는다. 키는 해당 회사의 API 주소로만 보낸다.
 
-const keyFile = process.env.CHARTDESK_KEY_FILE ?? join(home, "ai-keys.json");
+// 데스크톱 앱은 앱 폴더가 읽기 전용이라 사용자 데이터 폴더를 넘겨준다.
+let keyFile = join(home, "ai-keys.json");
 // 주소는 시험용 서버로 바꿀 수 있다.
 const ai = {
   anthropic: {
@@ -239,7 +241,7 @@ const extendedFeed = await import("./local/tv-feed.mjs").catch((error) => {
   throw error;
 });
 
-createServer(async (req, res) => {
+const server = createServer(async (req, res) => {
   const requestUrl = new URL(req.url, "http://localhost");
   if (requestUrl.pathname === "/api/tv/bars") {
     if (req.method !== "GET") {
@@ -283,6 +285,26 @@ createServer(async (req, res) => {
   } catch {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("Not found");
   }
-}).listen(port, "127.0.0.1", () => {
-  console.log(`ChartDesk: http://127.0.0.1:${port}/`);
 });
+
+/** 서버를 띄운다. 127.0.0.1에서만 듣는다. */
+export function startServer(options = {}) {
+  port = options.port ?? 5173;
+  keyFile = options.keyFile ?? keyFile;
+  return new Promise((done, fail) => {
+    server.once("error", fail);
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", fail);
+      done({ port, url: `http://127.0.0.1:${port}/` });
+    });
+  });
+}
+
+// node server.mjs로 직접 실행했을 때.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const { url } = await startServer({
+    port: Number(process.env.PORT ?? 5173),
+    keyFile: process.env.CHARTDESK_KEY_FILE,
+  });
+  console.log(`ChartDesk: ${url}`);
+}

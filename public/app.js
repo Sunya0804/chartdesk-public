@@ -322,9 +322,12 @@
 	}
 	PROV.options.extended = state.extended;
 	let saveTimer = 0;
+	// 설정을 가져온 뒤 다시 불러오기 전까지는 지금 상태를 저장하지 않는다.
+	let savingFrozen = false;
 
 	function save() {
 		clearTimeout(saveTimer);
+		if (savingFrozen) return;
 		saveTimer = setTimeout(() => {
 			try {
 				localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -2582,6 +2585,94 @@
 	}
 
 	$('shot-btn').addEventListener('click', saveScreenshot);
+
+	// ---------- 설정 내보내기·가져오기 ----------
+	// 지표, 작도, 관심종목, 테마, AI 창 설정처럼 이 브라우저(앱)에 저장된 chartdesk.* 값을 파일 하나로 옮긴다.
+	// AI API 키는 서버 쪽 파일에 있어서 들어가지 않는다.
+	const SETTINGS_PREFIX = 'chartdesk.';
+	const SETTINGS_FORMAT = 'chartdesk-settings';
+
+	function exportSettings() {
+		closePopover();
+		clearTimeout(saveTimer);
+		const storage = {};
+		try {
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+			for (let i = 0; i < localStorage.length; i++) {
+				const key = localStorage.key(i);
+				if (key.startsWith(SETTINGS_PREFIX)) storage[key] = localStorage.getItem(key);
+			}
+		}
+		catch {
+			toast('설정을 읽지 못했습니다.');
+			return;
+		}
+		const body = JSON.stringify({ format: SETTINGS_FORMAT, version: 1, exportedAt: new Date().toISOString(), storage }, null, 2);
+		const link = el('a', {
+			href: URL.createObjectURL(new Blob([body], { type: 'application/json' })),
+			download: `chartdesk-settings_${ new Date().toISOString().slice(0, 10) }.json`,
+		});
+		link.click();
+		setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+	}
+
+	function importSettings() {
+		closePopover();
+		const input = el('input', { type: 'file', accept: '.json,application/json' });
+		input.addEventListener('change', async () => {
+			const file = input.files?.[0];
+			if (!file) return;
+			let parsed;
+			try {
+				parsed = JSON.parse(await file.text());
+			}
+			catch {
+				toast('설정 파일을 읽지 못했습니다. JSON 형식이 아닙니다.');
+				return;
+			}
+			const entries = parsed?.format === SETTINGS_FORMAT && parsed.storage && typeof parsed.storage === 'object'
+				? Object.entries(parsed.storage).filter(([key, value]) => key.startsWith(SETTINGS_PREFIX) && typeof value === 'string')
+				: [];
+			if (!entries.some(([key]) => key === STORAGE_KEY)) {
+				toast('ChartDesk 설정 파일이 아닙니다.');
+				return;
+			}
+			try {
+				// 가져온 값이 저장 중인 현재 상태에 덮이지 않게, 예약된 저장을 취소하고 다시 읽는다.
+				clearTimeout(saveTimer);
+				for (const [key, value] of entries) localStorage.setItem(key, value);
+			}
+			catch {
+				toast('설정을 저장하지 못했습니다.');
+				return;
+			}
+			savingFrozen = true;
+			location.reload();
+		});
+		input.click();
+	}
+
+	$('settings-btn').append(icon('gear'));
+	$('settings-btn').addEventListener('click', () => {
+		const desktop = window.chartdeskApp;
+		const version = el('p', { class: 'version', text: desktop ? `ChartDesk ${ desktop.version }` : '브라우저에서 실행 중' });
+		const items = [
+			el('p', { class: 'title', text: '설정' }),
+			el('button', { class: 'menu-option', 'data-action': 'export-settings', text: '설정 내보내기', onclick: exportSettings }),
+			el('button', { class: 'menu-option', 'data-action': 'import-settings', text: '설정 가져오기', onclick: importSettings }),
+			el('p', { class: 'hint', text: '지표, 작도, 관심종목, 알림, 테마, AI 창 설정을 파일로 옮깁니다. AI API 키는 들어가지 않습니다. 가져오면 지금 설정을 덮어쓰고 화면을 다시 불러옵니다.' }),
+			version,
+		];
+		if (desktop) {
+			const status = el('p', { class: 'version', text: desktop.updateStatus() });
+			items.push(status, el('button', { class: 'menu-option', 'data-action': 'check-update', text: '업데이트 확인', onclick: async () => {
+				status.textContent = '업데이트 확인 중…';
+				status.textContent = await desktop.checkForUpdates();
+			} }));
+		}
+		popover.className = 'popover';
+		openPopover($('settings-btn'), ...items);
+	});
 
 	// 관심종목의 ＋로 고른 종목은 목록에 넣으면서 차트에도 바로 띄운다.
 	$('wl-add').addEventListener('click', () => {
