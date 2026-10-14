@@ -23,7 +23,7 @@ node server.mjs
 
 | 파일 | 내용 |
 |---|---|
-| `server.mjs` | 정적 파일 제공, Yahoo Finance 대리 호출, AI API 대리 호출, Claude Code(구독 계정) 실행 |
+| `server.mjs` | 정적 파일 제공, Yahoo Finance 대리 호출, AI API 대리 호출, Claude Code·Codex·Gemini CLI(계정 로그인) 실행 |
 | `desktop/` | 데스크톱 앱(Electron): 창, 자동 업데이트 |
 | `public/app.js` | 화면, 차트, 상태 저장, 설정 내보내기·가져오기 |
 | `public/providers.js` | 시세 공급원 (Binance, Upbit, Bithumb, Bybit, OKX, Yahoo Finance) |
@@ -54,7 +54,7 @@ gh release create v1.0.1 dist/ChartDesk-Setup-1.0.1.exe dist/ChartDesk-Setup-1.0
 
 - Yahoo Finance는 공식 공개 API가 아닙니다. 개인 용도로만 쓰고, 예고 없이 막힐 수 있습니다. 주식 시세는 지연될 수 있습니다.
 - 확장 시간의 장전·장후 봉에는 거래량이 없습니다. Yahoo가 그 구간의 거래량을 주지 않기 때문입니다.
-- AI 분석은 각자 자기 API 키(Claude, GPT, Gemini)를 넣거나, Claude는 이 컴퓨터의 [Claude Code](https://claude.com/claude-code)에 Claude Pro·Max 계정으로 로그인해 두면 키 없이 쓸 수 있습니다(AI 분석 → 계정 연결). 이때 사용량은 구독 한도에서 빠집니다.
+- AI 분석은 각자 자기 API 키(Claude, GPT, Gemini)를 넣거나, 이 컴퓨터의 공식 CLI에 본인 계정으로 로그인해 두면 키 없이 쓸 수 있습니다(AI 분석 → 계정 연결): Claude는 [Claude Code](https://claude.com/claude-code)(Claude Pro·Max), GPT는 [Codex](https://developers.openai.com/codex/cli) 앱 또는 CLI(ChatGPT 계정), Gemini는 [Gemini CLI](https://github.com/google-gemini/gemini-cli)(Google 계정). 이때 사용량은 각 계정의 한도에서 빠집니다.
 - 투자 판단의 책임은 쓰는 사람에게 있습니다. 지표와 AI 분석은 참고용입니다.
 - GOSU 지표는 공개된 거래내역을 분석한 통계를 옮긴 것입니다. 이 지표나 이를 바탕으로 한 프로그램을 유료로 판매하지 말아 주세요.
 - 서버는 `127.0.0.1`에서만 듣습니다. 외부에 공개하는 용도로 만들지 않았습니다.

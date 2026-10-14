@@ -1,5 +1,5 @@
 // AI 분석 창. 대화는 로컬 서버(/api/ai)를 거쳐 Claude, GPT, Gemini의 API로 보낸다. API 키는 서버 쪽 파일에만 둔다.
-// Claude는 이 컴퓨터의 Claude Code에 로그인한 구독 계정으로도 쓸 수 있다(서버가 CLI를 불러 답을 받는다).
+// 이 컴퓨터의 공식 CLI(Claude Code, Codex, Gemini CLI)에 로그인한 계정으로도 쓸 수 있다(서버가 CLI를 불러 답을 받는다).
 (() => {
 	'use strict';
 
@@ -10,9 +10,16 @@
 	const STORAGE_KEY = 'chartdesk.ai.v1';
 	const PROVIDERS = [
 		{ id: 'anthropic', label: 'Claude', company: 'Anthropic', where: 'console.anthropic.com → API Keys', fallback: 'claude-opus-5-5', prefer: /^claude-opus/, web: 'https://claude.ai/new', site: 'claude.ai',
-			account: { cli: 'Claude Code', plan: 'Claude Pro·Max', install: 'https://claude.com/claude-code', fallback: 'sonnet' } },
-		{ id: 'openai', label: 'GPT', company: 'OpenAI', where: 'platform.openai.com → API keys', fallback: '', prefer: /^gpt-\d/, web: 'https://chatgpt.com/', site: 'chatgpt.com' },
-		{ id: 'gemini', label: 'Gemini', company: 'Google', where: 'aistudio.google.com → Get API key', fallback: '', prefer: /^gemini-.*pro/, web: 'https://gemini.google.com/app', site: 'gemini.google.com' },
+			account: { cli: 'Claude Code', plan: 'Claude Pro·Max', install: 'https://claude.com/claude-code', fallback: 'sonnet',
+				login: '터미널 창이 열렸습니다. 브라우저에서 로그인을 마친 뒤 "다시 확인"을 누르세요.' } },
+		{ id: 'openai', label: 'GPT', company: 'OpenAI', where: 'platform.openai.com → API keys', fallback: '', prefer: /^gpt-\d/, web: 'https://chatgpt.com/', site: 'chatgpt.com',
+			account: { cli: 'Codex', plan: 'ChatGPT Plus·Pro', install: 'https://developers.openai.com/codex/cli', fallback: 'default',
+				login: '터미널 창이 열렸습니다. "Sign in with ChatGPT"로 로그인을 마친 뒤 "다시 확인"을 누르세요.',
+				note: 'Codex 앱이나 Codex CLI 중 하나만 있으면 됩니다. Codex는 답을 다 만든 뒤 한 번에 보여 줍니다.' } },
+		{ id: 'gemini', label: 'Gemini', company: 'Google', where: 'aistudio.google.com → Get API key', fallback: '', prefer: /^gemini-.*pro/, web: 'https://gemini.google.com/app', site: 'gemini.google.com',
+			account: { cli: 'Gemini CLI', plan: 'Google', install: 'https://github.com/google-gemini/gemini-cli', fallback: 'auto',
+				login: '터미널 창에서 "Sign in with Google"을 고르고 브라우저에서 로그인한 뒤, 터미널에 /quit를 입력하고 "다시 확인"을 누르세요.',
+				note: '설치: 터미널에서 npm install -g @google/gemini-cli' } },
 	];
 	const byId = new Map(PROVIDERS.map(provider => [provider.id, provider]));
 
@@ -335,6 +342,8 @@
 			const data = await response.json().catch(() => ({}));
 			throw new Error(data.error ?? `HTTP ${ response.status }`);
 		}
+		// 계정(CLI)으로 받은 답은 서버가 어느 서비스든 Anthropic 이벤트 모양으로 바꿔 보낸다.
+		const read = via(provider) === 'account' ? extract.anthropic : extract[provider];
 		const reader = response.body.getReader();
 		const decoder = new TextDecoder();
 		let buffer = '';
@@ -355,7 +364,7 @@
 				catch {
 					continue;
 				}
-				const text = extract[provider](event);
+				const text = read(event);
 				if (text) onText(text);
 			}
 		}
@@ -503,7 +512,7 @@
 	}
 
 	function keysView() {
-		const rows = [el('p', { class: 'hint', text: 'Claude는 구독 계정(Claude Pro·Max)으로 로그인하거나 API 키로 연결합니다. GPT·Gemini는 API 키로 연결합니다. 키는 이 컴퓨터의 ChartDesk 폴더(ai-keys.json)에만 저장되고, 해당 회사의 API 주소로만 보냅니다. 키 없이 쓰는 또 다른 방법은 아래의 "브리핑을 웹에서"입니다. 프롬프트를 복사해 드리고, 본인 계정으로 로그인한 웹 창에 붙여 넣어 보내는 방식입니다.' })];
+		const rows = [el('p', { class: 'hint', text: '세 서비스 모두 이 컴퓨터의 공식 CLI(Claude Code, Codex, Gemini CLI)에 로그인한 본인 계정으로 쓰거나, API 키로 연결할 수 있습니다. 계정으로 쓰면 API 요금 없이 구독(또는 무료) 한도에서 빠집니다. 키는 이 컴퓨터의 ChartDesk 폴더(ai-keys.json)에만 저장되고, 해당 회사의 API 주소로만 보냅니다. 키 없이 쓰는 또 다른 방법은 아래의 "브리핑을 웹에서"입니다. 프롬프트를 복사해 드리고, 본인 계정으로 로그인한 웹 창에 붙여 넣어 보내는 방식입니다.' })];
 		for (const provider of PROVIDERS) {
 			const account = provider.account && status[provider.id]?.account;
 			const using = via(provider.id);
@@ -528,7 +537,7 @@
 						onclick: async() => {
 							try {
 								await api('/api/ai/login', { provider: provider.id });
-								APP.toast('터미널 창이 열렸습니다. 브라우저에서 로그인을 마친 뒤 "다시 확인"을 누르세요.');
+								APP.toast(provider.account.login);
 							}
 							catch (error) {
 								APP.toast(error.message);
@@ -549,7 +558,7 @@
 				accountRows.push(
 					el('div', { class: 'ai-key-head' }, el('span', { text: `구독 계정 · ${ provider.account.cli }` }),
 						el('span', { class: account?.loggedIn ? 'up' : 'muted', text: using === 'account' && account?.loggedIn ? `${ state } · 사용 중` : state })),
-					el('small', { text: `이 컴퓨터의 ${ provider.account.cli }에 로그인한 ${ provider.account.plan } 계정으로 답을 받습니다. 사용량은 구독 한도에서 빠지고 API 요금은 들지 않습니다. 로그인 정보는 ${ provider.account.cli }가 보관하며 ChartDesk는 보지 않습니다.` }),
+					el('small', { text: `이 컴퓨터의 ${ provider.account.cli }에 로그인한 ${ provider.account.plan } 계정으로 답을 받습니다. API 요금은 들지 않습니다. 로그인 정보는 ${ provider.account.cli }가 보관하며 ChartDesk는 보지 않습니다.${ provider.account.note ? ` ${ provider.account.note }` : '' }` }),
 					el('div', { class: 'ai-key-row' }, ...actions),
 					el('span', { class: 'ai-key-head' }, el('span', { text: 'API 키' }),
 						el('span', { class: status[provider.id]?.connected ? 'up' : 'muted', text: status[provider.id]?.connected ? `연결됨${ using === 'key' ? ' · 사용 중' : '' }` : '연결 안 됨' })));
