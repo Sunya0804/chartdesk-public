@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ko" data-theme="black">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ChartDesk</title>
+	<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23161a22'/%3E%3Cpath d='M4 11V6M8 12V4M12 10V7' stroke='%234c8dff' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+	<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+	<header class="topbar">
+		<div class="brand"><span class="brand-mark"></span>ChartDesk</div>
+		<div class="tabs" id="tabs"></div>
+		<button class="icon-btn" id="tab-add" title="새 탭"></button>
+		<button class="search-btn" id="search-btn" title="종목 검색: 차트 화면에서 글자를 치거나 / 를 눌러도 열립니다"><span>종목 검색</span><kbd>/</kbd></button>
+		<div class="spacer"></div>
+		<button class="ai-btn" id="ai-btn" title="AI 분석: 지금 차트에 대해 Claude, GPT, Gemini와 대화합니다">✦ AI 분석</button>
+		<div class="seg" id="layout-seg" title="차트 배치">
+			<button data-layout="1">1</button>
+			<button data-layout="2">2</button>
+			<button data-layout="4">4</button>
+		</div>
+		<button class="icon-btn" id="opt-sync" title="십자선 동기화"></button>
+		<button class="icon-btn" id="opt-link" title="심볼 연동: 한 차트의 종목을 바꾸면 함께 바뀝니다"></button>
+		<span class="divider"></span>
+		<button class="icon-btn" id="shot-btn" title="차트 이미지 저장"></button>
+		<button class="icon-btn" id="theme-btn" title="테마 전환"></button>
+		<span class="conn" id="conn">연결 중</span>
+	</header>
+
+	<main class="workspace">
+		<nav class="tools" id="tools" aria-label="작도 도구"></nav>
+		<section class="grid" id="grid"></section>
+		<aside class="side">
+			<div class="panel detail">
+				<div class="detail-head">
+					<span class="sym" id="detail-symbol"></span>
+					<span class="change" id="detail-change"></span>
+				</div>
+				<div class="sub" id="detail-sub"></div>
+				<div class="price" id="detail-price">–</div>
+				<dl class="stats">
+					<div><dt>고가</dt><dd id="detail-high">–</dd></div>
+					<div><dt>저가</dt><dd id="detail-low">–</dd></div>
+					<div><dt>거래대금</dt><dd id="detail-turnover">–</dd></div>
+				</dl>
+			</div>
+			<div class="panel grow">
+				<h2>관심종목 <button class="icon-btn" id="wl-add" title="종목 추가"></button></h2>
+				<ul class="list" id="watchlist"></ul>
+			</div>
+			<div class="panel grow">
+				<h2>알림 <button class="text-btn small" id="notify-btn" hidden>데스크톱 알림 켜기</button></h2>
+				<ul class="list" id="alerts"></ul>
+			</div>
+			<footer class="attrib">
+				시세: Binance · Upbit · Bithumb · Bybit · OKX · Yahoo Finance 공개 데이터 · 차트:
+				<a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a> Lightweight Charts™
+			</footer>
+		</aside>
+		<aside class="ai-panel" id="ai-panel" hidden></aside>
+	</main>
+
+	<div class="popover" id="popover" hidden></div>
+	<div class="toasts" id="toasts"></div>
+
+	<script src="vendor/lightweight-charts.standalone.production.js"></script>
+	<script src="providers.js"></script>
+	<script src="indicators.js"></script>
+	<script src="indicator-help.js"></script>
+	<script src="drawings.js"></script>
+	<script src="app.js"></script>
+	<script src="ai.js"></script>
+</body>
+</html>

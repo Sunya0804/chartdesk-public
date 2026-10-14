@@ -1,0 +1,10 @@
+{
+  "name": "chartdesk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "개인용 실시간 차트 워크스페이스",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}
