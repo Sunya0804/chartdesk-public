@@ -51,7 +51,7 @@ window.ChartDeskDrawings = (() => {
 		// 피보나치
 		{ id: 'fib', type: 'fib', name: '피보나치 되돌림', key: 'F', points: 2, style: { ...FIB_STYLE, extendLeft: false, extendRight: false, showPrices: true }, levels: RETRACE },
 		{ id: 'fibext', type: 'fibext', name: '추세 기반 피보나치 확장', points: 3, style: { ...FIB_STYLE, extendLeft: false, extendRight: false, showPrices: true }, levels: EXTENSION },
-		{ id: 'fibchannel', type: 'fibchannel', name: '피보나치 채널', points: 3, style: FIB_STYLE, levels: RETRACE },
+		{ id: 'fibchannel', type: 'fibchannel', name: '피보나치 채널', points: 3, style: { ...FIB_STYLE, extendLeft: false, extendRight: false }, levels: RETRACE },
 		{ id: 'fibtime', type: 'fibtime', name: '피보나치 타임존', points: 2, style: { ...FIB_STYLE, fill: 0 }, levels: [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89] },
 		{ id: 'fibfan', type: 'fibfan', name: '피보나치 스피드 저항 팬', points: 2, style: { ...FIB_STYLE, fill: 0 }, levels: QUARTERS },
 		{ id: 'fibtrendtime', type: 'fibtrendtime', name: '추세 기반 피보나치 시간', points: 3, icon: 'fibtime', style: { ...FIB_STYLE, fill: 0 }, levels: [0, 0.382, 0.618, 1, 1.382, 1.618, 2, 2.618, 3] },
@@ -183,7 +183,7 @@ window.ChartDeskDrawings = (() => {
 		triangle: FILL_FIELDS,
 		fib: ['color', 'width', 'dash', 'fill', 'extendLeft', 'extendRight', 'showPrices', 'levels'],
 		fibext: ['color', 'width', 'dash', 'fill', 'extendLeft', 'extendRight', 'showPrices', 'levels'],
-		fibchannel: LEVEL_FIELDS,
+		fibchannel: ['color', 'width', 'dash', 'fill', 'extendLeft', 'extendRight', 'levels'],
 		gannbox: LEVEL_FIELDS,
 		fibtime: ['color', 'width', 'dash', 'levels'],
 		fibtrendtime: ['color', 'width', 'dash', 'levels'],
@@ -470,13 +470,17 @@ window.ChartDeskDrawings = (() => {
 			const { style, shape } = c;
 			const onLine = b.x === a.x ? a.y : a.y + (b.y - a.y) * (p.x - a.x) / (b.x - a.x);
 			const offset = p.y - onLine;
-			const levels = activeLevels(style).map(level => ({ ...level, line: [shifted(a, 0, offset * level.value), shifted(b, 0, offset * level.value)] }));
+			// 선마다 왼쪽 끝과 오른쪽 끝을 정해, 되돌림처럼 왼쪽·오른쪽으로 기울기를 따라 화면 끝까지 늘린다.
+			const [first, second] = a.x <= b.x ? [a, b] : [b, a];
+			const levels = activeLevels(style).map((level) => {
+				const start = shifted(first, 0, offset * level.value);
+				return { ...level, start, line: extend(start, shifted(second, 0, offset * level.value), style.extendLeft, style.extendRight) };
+			});
 			levels.forEach((level, i) => {
 				const next = levels[i + 1];
 				if (next && style.fill > 0) shape.fills.push({ color: rgba(next.color, style.fill), points: [level.line[0], level.line[1], next.line[1], next.line[0]] });
 				shape.paths.push({ color: level.color, width: style.width, dash: style.dash, points: level.line });
-				const left = level.line[0].x <= level.line[1].x ? level.line[0] : level.line[1];
-				layer.text(shape, String(level.value), left.x + 4, left.y - 15, level.color);
+				layer.text(shape, String(level.value), level.start.x + 4, level.start.y - 15, level.color);
 			});
 		},
 
