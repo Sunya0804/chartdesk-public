@@ -30,6 +30,9 @@
 			const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? {};
 			return {
 				open: saved.open === true,
+				// 창 너비(px). null이면 기본 너비. wide면 넓게 보기 중.
+				width: Number.isFinite(saved.width) ? saved.width : null,
+				wide: saved.wide === true,
 				provider: byId.has(saved.provider) ? saved.provider : 'anthropic',
 				models: saved.models && typeof saved.models === 'object' ? saved.models : {},
 				// 서비스마다 'key'(API 키) 또는 'account'(구독 계정). 정하지 않았으면 연결된 쪽을 쓴다.
@@ -37,7 +40,7 @@
 			};
 		}
 		catch {
-			return { open: false, provider: 'anthropic', models: {}, via: {} };
+			return { open: false, provider: 'anthropic', models: {}, via: {}, width: null, wide: false };
 		}
 	}
 
@@ -523,6 +526,8 @@
 	const clearButton = el('button', { class: 'text-btn', text: '새 대화' });
 	const keysButton = el('button', { class: 'text-btn', text: '계정 연결' });
 	const closeButton = el('button', { class: 'icon-btn', title: '닫기', text: '×' });
+	const wideButton = el('button', { class: 'icon-btn ai-wide' });
+	const resizer = el('div', { class: 'ai-resize', title: '끌어서 너비 조절 · 두 번 누르면 기본 너비' });
 	const target = el('span', { class: 'ai-target' });
 
 	const accountReady = id => status[id]?.account?.loggedIn === true;
@@ -863,6 +868,57 @@
 		send(text, undefined, false);
 	}
 
+	// ---------- 창 너비 ----------
+	// 왼쪽 가장자리를 끌어 너비를 바꾸고, 머리글의 버튼으로 넓게 보기를 켜고 끈다. 차트는 남은 폭에 맞춰 저절로 줄어든다.
+
+	const DEFAULT_WIDTH = 400;
+	const MIN_WIDTH = 320;
+	// 차트와 도구 막대가 쓸 폭은 남긴다.
+	const maxWidth = () => Math.max(MIN_WIDTH, window.innerWidth - 480);
+	const clampWidth = width => Math.round(Math.min(maxWidth(), Math.max(MIN_WIDTH, width)));
+
+	function applyWidth() {
+		const width = settings.wide ? clampWidth(window.innerWidth * 0.6) : clampWidth(settings.width ?? DEFAULT_WIDTH);
+		panel.style.width = `${ width }px`;
+		wideButton.textContent = settings.wide ? '⤡' : '⤢';
+		wideButton.title = settings.wide ? '원래 너비로' : '넓게 보기';
+	}
+
+	wideButton.addEventListener('click', () => {
+		settings.wide = !settings.wide;
+		saveSettings();
+		applyWidth();
+	});
+	resizer.addEventListener('pointerdown', (event) => {
+		event.preventDefault();
+		resizer.setPointerCapture(event.pointerId);
+		const startX = event.clientX;
+		const startWidth = panel.getBoundingClientRect().width;
+		panel.classList.add('resizing');
+		const move = (moved) => {
+			// 왼쪽으로 끌수록 넓어진다. 끌기 시작하면 넓게 보기는 풀고 그 너비를 쓴다.
+			settings.wide = false;
+			settings.width = clampWidth(startWidth + startX - moved.clientX);
+			applyWidth();
+		};
+		const done = () => {
+			resizer.removeEventListener('pointermove', move);
+			panel.classList.remove('resizing');
+			saveSettings();
+		};
+		resizer.addEventListener('pointermove', move);
+		resizer.addEventListener('pointerup', done, { once: true });
+		resizer.addEventListener('pointercancel', done, { once: true });
+	});
+	resizer.addEventListener('dblclick', () => {
+		settings.wide = false;
+		settings.width = null;
+		saveSettings();
+		applyWidth();
+	});
+	window.addEventListener('resize', applyWidth);
+	applyWidth();
+
 	function setOpen(open) {
 		settings.open = open;
 		saveSettings();
@@ -875,7 +931,8 @@
 	}
 
 	panel.append(
-		el('div', { class: 'ai-head' }, el('b', { text: 'AI 분석' }), target, el('span', { class: 'spacer' }), keysButton, closeButton),
+		resizer,
+		el('div', { class: 'ai-head' }, el('b', { text: 'AI 분석' }), target, el('span', { class: 'spacer' }), keysButton, wideButton, closeButton),
 		el('div', { class: 'ai-pick' }, providerBar, modelSelect),
 		body,
 		el('div', { class: 'ai-quick' }, kindSelect, briefButton, webButton, el('span', { class: 'spacer' }), clearButton),

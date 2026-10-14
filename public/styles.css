@@ -680,6 +680,8 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 	.grid { min-height: 70vh; flex-basis: calc(100% - 44px); }
 	.grid.layout-2, .grid.layout-4 { grid-template: none; grid-auto-rows: 60vh; }
 	.side { width: 100%; padding: 0 4px 4px; }
+	.ai-panel { width: 100% !important; }
+	.ai-resize, .ai-wide { display: none; }
 	.panel.grow { max-height: 40vh; }
 	.topbar { flex-wrap: wrap; height: auto; padding: 6px 10px; }
 	.pane-foot { flex-wrap: wrap; }
@@ -727,6 +729,7 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 .muted { color: var(--muted); }
 
 .ai-panel {
+	position: relative;
 	width: 400px;
 	flex: none;
 	display: flex;
@@ -738,6 +741,11 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 	border-radius: 8px;
 	overflow: hidden;
 }
+/* 왼쪽 가장자리를 끌어 너비를 바꾼다. */
+.ai-resize { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 2; touch-action: none; }
+.ai-resize:hover, .ai-panel.resizing .ai-resize { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.ai-panel.resizing { user-select: none; }
+.ai-wide { font-size: 15px; }
 .ai-head { display: flex; align-items: center; gap: 8px; padding: 8px 6px 8px 12px; border-bottom: 1px solid var(--border); }
 .ai-target { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .ai-pick { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--grid); }
