@@ -236,11 +236,17 @@ const accounts = {
     },
     models: async () => ["auto", "pro", "flash", "flash-lite"],
     // 지시문은 GEMINI_SYSTEM_MD로 바꾼다. 확장 기능은 끈다.
+    // 신뢰하지 않은 폴더에서는 실행을 거부하므로, 돌리는 곳(ChartDesk의 빈 임시 폴더)을 신뢰한다고 알린다.
     run: ({ model, systemFile, messages }) => ({
       args: ["-p", "", "-o", "stream-json", "-e", "none", ...(model === "auto" ? [] : ["-m", model])],
-      env: { GEMINI_SYSTEM_MD: systemFile },
+      env: { GEMINI_SYSTEM_MD: systemFile, GEMINI_CLI_TRUST_WORKSPACE: "true" },
       input: transcript(messages),
     }),
+    // Google은 무료 개인 계정(Gemini Code Assist for individuals)의 Gemini CLI 사용을 끝냈다. 이때는 키로 쓰라고 알린다.
+    explain: (failure) =>
+      /IneligibleTierError|no longer supported/i.test(failure)
+        ? "Google이 이 계정 종류(무료 개인 계정)의 Gemini CLI 사용을 중단했습니다. Gemini는 API 키(aistudio.google.com, 무료 한도 있음)로 연결하세요."
+        : null,
     events(line) {
       if (line.type === "message" && line.role === "assistant") {
         const text = typeof line.content === "string" ? line.content : (line.content ?? []).map((part) => part.text ?? "").join("");
@@ -328,7 +334,7 @@ async function chatWithAccount(id, body, res) {
   });
   await rm(systemFile, { force: true });
   if (started) res.end();
-  else sendJson(res, 502, { error: failure.trim().slice(-400) || `CLI가 답 없이 끝났습니다 (코드 ${code})` });
+  else sendJson(res, 502, { error: account.explain?.(failure) ?? (failure.trim().slice(-400) || `CLI가 답 없이 끝났습니다 (코드 ${code})`) });
 }
 
 /** 로그인은 CLI가 브라우저를 열어 처리한다. 입력이 필요할 수 있어 새 터미널 창에서 띄운다. */
