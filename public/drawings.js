@@ -1123,6 +1123,12 @@ window.ChartDeskDrawings = (() => {
 					draw: target => target.useMediaCoordinateSpace(scope => this.draw(scope.context, scope.mediaSize)),
 				}),
 			};
+			this.axisView = {
+				zOrder: () => 'top',
+				renderer: () => ({
+					draw: target => target.useMediaCoordinateSpace(scope => this.drawCountdown(scope.context, scope.mediaSize)),
+				}),
+			};
 			this.onDown = event => this.handleDown(event);
 			this.onMove = event => this.handleMove(event);
 			this.onDoubleClick = event => this.handleDoubleClick(event);
@@ -1147,23 +1153,33 @@ window.ChartDeskDrawings = (() => {
 			return [this.view];
 		}
 
-		priceAxisViews() {
-			const views = [];
-			// 봉 마감까지 남은 시간. 현재가 라벨 바로 아래에 붙인다.
+		// 현재가와 봉 마감까지 남은 시간을 한 덩어리로 가격 축 맨 위에 그린다.
+		// 보통의 축 라벨로 두면 이동평균처럼 현재가 가까이 있는 선의 라벨에 가려 짧은 주기에서는 보이지 않는다.
+		priceAxisPaneViews() {
+			return [this.axisView];
+		}
+
+		drawCountdown(context, size) {
 			const countdown = this.env.countdown?.();
 			const base = countdown ? this.env.series().priceToCoordinate(countdown.price) : null;
-			if (base !== null) {
-				views.push({
-					coordinate: () => base + 20,
-					fixedCoordinate: () => base + 20,
-					text: () => countdown.text,
-					textColor: () => '#ffffff',
-					backColor: () => countdown.color,
-					visible: () => true,
-				});
-			}
-			if (this.env.hidden()) return views;
-			return views.concat(this.env.list()
+			if (base === null) return;
+			const row = 18;
+			context.save();
+			context.font = `12px ${ this.env.fontFamily() }`;
+			context.textAlign = 'left';
+			context.textBaseline = 'middle';
+			context.fillStyle = countdown.color;
+			context.fillRect(0, Math.round(base - row / 2), size.width, row * 2);
+			context.fillStyle = '#ffffff';
+			context.fillText(this.env.series().priceFormatter().format(countdown.price), 6, Math.round(base) + 0.5);
+			context.globalAlpha = 0.85;
+			context.fillText(countdown.text, 6, Math.round(base + row) + 0.5);
+			context.restore();
+		}
+
+		priceAxisViews() {
+			if (this.env.hidden()) return [];
+			return this.env.list()
 				.filter(drawing => ['hline', 'hray', 'cross'].includes(drawing.type))
 				.map((drawing) => {
 					const price = drawing.points[0].p;
@@ -1175,7 +1191,7 @@ window.ChartDeskDrawings = (() => {
 						backColor: () => drawing.style.color,
 						visible: () => y !== null,
 					};
-				}));
+				});
 		}
 
 		redraw() {
