@@ -1,6 +1,8 @@
 // 정적 파일과, 브라우저에서 직접 부를 수 없는 주소(시세, AI)를 대신 불러 주는 로컬 서버. 외부 의존성 없음.
 import { createServer } from "node:http";
-import { readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -110,6 +112,121 @@ const ai = {
   },
 };
 
+// 구독 계정으로 쓰기: 이 컴퓨터에 깔린 공식 CLI(Claude Code)에 본인 계정으로 로그인해 두면, 그 CLI를 불러 답을 받는다.
+// 로그인과 토큰은 CLI가 맡고 ChartDesk는 보지 않는다. 사용량은 구독 한도에서 빠진다.
+const accounts = {
+  anthropic: {
+    command: "claude",
+    models: ["opus", "sonnet", "haiku"],
+    login: ["auth", "login"],
+    async status() {
+      const { code, out } = await runCli(this.command, ["auth", "status", "--json"], "", 15000);
+      if (code === null) return { installed: false, loggedIn: false };
+      try {
+        const body = JSON.parse(out);
+        return { installed: true, loggedIn: body.loggedIn === true, plan: body.subscriptionType ?? body.authMethod ?? "" };
+      } catch {
+        return { installed: true, loggedIn: false };
+      }
+    },
+    // 도구는 모두 끄고, 설정·MCP·CLAUDE.md를 읽지 않도록 빈 폴더에서 돌린다. 응답은 API와 같은 스트림 이벤트로 나온다.
+    args: ({ model, systemFile }) => [
+      "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+      "--no-session-persistence", "--tools", "", "--setting-sources", "", "--strict-mcp-config",
+      "--system-prompt-file", systemFile, "--model", model,
+    ],
+    // 한 줄이 API 이벤트 하나가 되도록 꺼낸다. 브라우저는 API와 똑같이 읽는다.
+    event(line) {
+      if (line.type === "stream_event") return line.event;
+      if (line.type === "result" && line.is_error) return { type: "error", error: { message: line.result || line.subtype || "응답 오류" } };
+      return null;
+    },
+  },
+};
+
+const cliHome = join(tmpdir(), "chartdesk-ai");
+// API 키가 환경 변수에 있으면 CLI가 구독 대신 그 키로 청구하므로 넘기지 않는다.
+const cliEnv = () => Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^ANTHROPIC_(API_KEY|AUTH_TOKEN)$/.test(name)));
+
+/** CLI를 실행해 끝날 때까지 기다린다. 설치돼 있지 않으면 code가 null이다. */
+function runCli(command, args, input, timeout) {
+  return new Promise((done) => {
+    let out = "";
+    let child;
+    try {
+      child = spawn(command, args, { cwd: tmpdir(), env: cliEnv(), windowsHide: true, timeout });
+    } catch {
+      done({ code: null, out });
+      return;
+    }
+    child.on("error", () => done({ code: null, out }));
+    child.stdout.on("data", (chunk) => (out += chunk));
+    child.on("close", (code) => done({ code: code ?? -1, out }));
+    child.stdin.end(input);
+  });
+}
+
+/** 지난 대화를 한 덩어리의 글로 묶는다. CLI는 질문 하나만 받기 때문이다. */
+function transcript(messages) {
+  if (messages.length === 1) return messages[0].content;
+  const earlier = messages.slice(0, -1).map((message) => `[${message.role === "user" ? "사용자" : "AI"}]\n${message.content}`);
+  return `${["[지금까지의 대화]", ...earlier].join("\n\n")}\n\n[이번 질문]\n${messages[messages.length - 1].content}`;
+}
+
+async function chatWithAccount(account, body, res) {
+  await mkdir(cliHome, { recursive: true });
+  const systemFile = join(cliHome, `system-${process.pid}-${Date.now()}.txt`);
+  await writeFile(systemFile, body.system);
+  const child = spawn(account.command, account.args({ model: body.model, systemFile }), { cwd: cliHome, env: cliEnv(), windowsHide: true });
+  let started = false;
+  let failure = "";
+  const start = () => {
+    if (started) return;
+    started = true;
+    res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" });
+  };
+  res.on("close", () => child.kill());
+  child.stderr.on("data", (chunk) => (failure += chunk));
+  let buffer = "";
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    const rows = buffer.split("\n");
+    buffer = rows.pop();
+    for (const row of rows) {
+      let event;
+      try {
+        event = account.event(JSON.parse(row));
+      } catch {
+        event = null;
+      }
+      if (!event) continue;
+      start();
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+  });
+  const code = await new Promise((done) => {
+    child.on("error", () => done(null));
+    child.on("close", done);
+    child.stdin.end(transcript(body.messages));
+  });
+  await rm(systemFile, { force: true });
+  if (started) {
+    res.end();
+    return;
+  }
+  const reason = code === null ? `${account.command} 명령을 찾지 못했습니다. Claude Code를 설치하세요` : failure.trim().slice(0, 300) || `${account.command}가 응답 없이 끝났습니다 (코드 ${code})`;
+  sendJson(res, 502, { error: reason });
+}
+
+/** 로그인은 CLI가 브라우저를 열어 처리한다. 입력이 필요할 수 있어 새 터미널 창에서 띄운다. */
+function openLogin(account) {
+  const line = [account.command, ...account.login].join(" ");
+  if (process.platform === "win32") spawn("cmd.exe", ["/c", "start", "", "cmd", "/k", line], { detached: true, stdio: "ignore" }).unref();
+  else if (process.platform === "darwin") spawn("osascript", ["-e", `tell application "Terminal" to do script "${line}"`], { detached: true, stdio: "ignore" }).unref();
+  else return false;
+  return true;
+}
+
 async function readKeys() {
   try {
     const keys = JSON.parse(await readFile(keyFile, "utf8"));
@@ -156,9 +273,23 @@ async function handleAi(req, res, url) {
     const status = {};
     for (const id of Object.keys(ai)) {
       const key = typeof keys[id] === "string" ? keys[id] : "";
-      status[id] = { connected: key.length > 0, hint: key ? `…${key.slice(-4)}` : "" };
+      status[id] = { connected: key.length > 0, hint: key ? `…${key.slice(-4)}` : "", account: accounts[id] ? await accounts[id].status() : null };
     }
     sendJson(res, 200, status);
+    return;
+  }
+
+  if (route === "POST /api/ai/login") {
+    const account = accounts[(await readBody(req)).provider];
+    if (!account) {
+      sendJson(res, 400, { error: "계정으로 로그인할 수 없는 서비스입니다" });
+      return;
+    }
+    if (!openLogin(account)) {
+      sendJson(res, 400, { error: `터미널에서 "${[account.command, ...account.login].join(" ")}"를 실행하세요` });
+      return;
+    }
+    sendJson(res, 200, { opened: true });
     return;
   }
 
@@ -176,6 +307,12 @@ async function handleAi(req, res, url) {
   }
 
   const provider = ai[route === "GET /api/ai/models" ? url.searchParams.get("provider") : undefined];
+  if (route === "GET /api/ai/models" && url.searchParams.get("via") === "account") {
+    const account = accounts[url.searchParams.get("provider")];
+    if (!account) sendJson(res, 400, { error: "계정으로 로그인할 수 없는 서비스입니다" });
+    else sendJson(res, 200, { models: account.models });
+    return;
+  }
   if (route === "GET /api/ai/models") {
     const key = keys[url.searchParams.get("provider")];
     if (!provider || !key) {
@@ -204,6 +341,12 @@ async function handleAi(req, res, url) {
       body.messages.every((message) => ["user", "assistant"].includes(message?.role) && typeof message.content === "string");
     if (!valid) {
       sendJson(res, 400, { error: "잘못된 요청입니다" });
+      return;
+    }
+    if (body.via === "account") {
+      const account = accounts[body.provider];
+      if (!account || !account.models.includes(body.model) || body.messages.length === 0) sendJson(res, 400, { error: "잘못된 요청입니다" });
+      else await chatWithAccount(account, body, res);
       return;
     }
     if (!key) {

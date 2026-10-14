@@ -1,4 +1,5 @@
 // AI 분석 창. 대화는 로컬 서버(/api/ai)를 거쳐 Claude, GPT, Gemini의 API로 보낸다. API 키는 서버 쪽 파일에만 둔다.
+// Claude는 이 컴퓨터의 Claude Code에 로그인한 구독 계정으로도 쓸 수 있다(서버가 CLI를 불러 답을 받는다).
 (() => {
 	'use strict';
 
@@ -8,7 +9,8 @@
 	const { el } = APP;
 	const STORAGE_KEY = 'chartdesk.ai.v1';
 	const PROVIDERS = [
-		{ id: 'anthropic', label: 'Claude', company: 'Anthropic', where: 'console.anthropic.com → API Keys', fallback: 'claude-opus-5-5', prefer: /^claude-opus/, web: 'https://claude.ai/new', site: 'claude.ai' },
+		{ id: 'anthropic', label: 'Claude', company: 'Anthropic', where: 'console.anthropic.com → API Keys', fallback: 'claude-opus-5-5', prefer: /^claude-opus/, web: 'https://claude.ai/new', site: 'claude.ai',
+			account: { cli: 'Claude Code', plan: 'Claude Pro·Max', install: 'https://claude.com/claude-code', fallback: 'sonnet' } },
 		{ id: 'openai', label: 'GPT', company: 'OpenAI', where: 'platform.openai.com → API keys', fallback: '', prefer: /^gpt-\d/, web: 'https://chatgpt.com/', site: 'chatgpt.com' },
 		{ id: 'gemini', label: 'Gemini', company: 'Google', where: 'aistudio.google.com → Get API key', fallback: '', prefer: /^gemini-.*pro/, web: 'https://gemini.google.com/app', site: 'gemini.google.com' },
 	];
@@ -23,10 +25,12 @@
 				open: saved.open === true,
 				provider: byId.has(saved.provider) ? saved.provider : 'anthropic',
 				models: saved.models && typeof saved.models === 'object' ? saved.models : {},
+				// 서비스마다 'key'(API 키) 또는 'account'(구독 계정). 정하지 않았으면 연결된 쪽을 쓴다.
+				via: saved.via && typeof saved.via === 'object' ? saved.via : {},
 			};
 		}
 		catch {
-			return { open: false, provider: 'anthropic', models: {} };
+			return { open: false, provider: 'anthropic', models: {}, via: {} };
 		}
 	}
 
@@ -324,7 +328,7 @@
 		const response = await fetch('/api/ai/chat', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ provider, model, system, messages: history }),
+			body: JSON.stringify({ provider, via: via(provider), model, system, messages: history }),
 			signal,
 		});
 		if (!response.ok) {
@@ -432,14 +436,28 @@
 	const closeButton = el('button', { class: 'icon-btn', title: '닫기', text: '×' });
 	const target = el('span', { class: 'ai-target' });
 
-	const connected = id => status[id]?.connected === true;
-	const currentModel = () => settings.models[settings.provider] || byId.get(settings.provider).fallback;
+	const accountReady = id => status[id]?.account?.loggedIn === true;
+	/** 이 서비스를 API 키로 쓸지('key') 구독 계정으로 쓸지('account'). */
+	function via(id) {
+		const chosen = settings.via[id];
+		if (chosen === 'account' && byId.get(id).account) return 'account';
+		if (chosen === 'key') return 'key';
+		return status[id]?.connected !== true && accountReady(id) ? 'account' : 'key';
+	}
+	const connected = id => (via(id) === 'account' ? accountReady(id) : status[id]?.connected === true);
+	const listKey = id => `${ id }:${ via(id) }`;
+	const modelsUrl = id => `/api/ai/models?provider=${ id }${ via(id) === 'account' ? '&via=account' : '' }`;
+	const fallbackModel = (id) => {
+		const provider = byId.get(id);
+		return via(id) === 'account' ? provider.account.fallback : provider.fallback;
+	};
+	const currentModel = () => settings.models[listKey(settings.provider)] || fallbackModel(settings.provider);
 
 	function renderProviders() {
 		providerBar.replaceChildren(...PROVIDERS.map(provider => el('button', {
 			class: `${ provider.id === settings.provider ? 'on' : '' }${ connected(provider.id) ? ' linked' : '' }`,
 			text: provider.label,
-			title: connected(provider.id) ? `${ provider.company } 연결됨` : `${ provider.company } 연결 안 됨`,
+			title: connected(provider.id) ? `${ provider.company } 연결됨 (${ via(provider.id) === 'account' ? '구독 계정' : 'API 키' })` : `${ provider.company } 연결 안 됨`,
 			onclick: () => {
 				settings.provider = provider.id;
 				saveSettings();
@@ -450,7 +468,7 @@
 	}
 
 	function renderModels() {
-		const list = modelLists.get(settings.provider) ?? [];
+		const list = modelLists.get(listKey(settings.provider)) ?? [];
 		const model = currentModel();
 		const ids = model && !list.includes(model) ? [model, ...list] : list;
 		modelSelect.replaceChildren(...(ids.length ? ids : ['']).map(id => el('option', { value: id, text: id || '모델 목록 없음' })));
@@ -461,18 +479,19 @@
 	/** 연결된 계정에서 쓸 수 있는 모델 목록을 받는다. 키가 맞는지도 이때 확인된다. */
 	async function loadModels(force = false) {
 		const id = settings.provider;
+		const key = listKey(id);
 		if (!connected(id)) return renderModels();
 		try {
-			if (!modelLists.has(id) || force) modelLists.set(id, (await api(`/api/ai/models?provider=${ id }`)).models);
-			const models = modelLists.get(id);
-			if (!settings.models[id] || !models.includes(settings.models[id])) {
-				const provider = byId.get(id);
-				settings.models[id] = models.includes(provider.fallback) ? provider.fallback : models.find(model => provider.prefer.test(model)) ?? models[0] ?? '';
+			if (!modelLists.has(key) || force) modelLists.set(key, (await api(modelsUrl(id))).models);
+			const models = modelLists.get(key);
+			if (!settings.models[key] || !models.includes(settings.models[key])) {
+				const fallback = fallbackModel(id);
+				settings.models[key] = models.includes(fallback) ? fallback : models.find(model => byId.get(id).prefer.test(model)) ?? models[0] ?? '';
 				saveSettings();
 			}
 		}
 		catch (error) {
-			modelLists.delete(id);
+			modelLists.delete(key);
 			if (id === settings.provider) note(`${ byId.get(id).label } 모델 목록을 받지 못했습니다: ${ error.message }`);
 		}
 		if (id === settings.provider) renderModels();
@@ -484,17 +503,67 @@
 	}
 
 	function keysView() {
-		const rows = [el('p', { class: 'hint', text: 'Claude·GPT·Gemini는 각 회사의 API 키로 연결합니다. 키는 이 컴퓨터의 ChartDesk 폴더(ai-keys.json)에만 저장되고, 해당 회사의 API 주소로만 보냅니다. 사용량은 각 회사가 API 요금으로 청구합니다. 키 없이 쓰려면 아래의 "브리핑을 웹에서"를 누르세요. 프롬프트를 복사해 드리고, 본인 계정으로 로그인한 웹 창에 붙여 넣어 보내는 방식입니다.' })];
+		const rows = [el('p', { class: 'hint', text: 'Claude는 구독 계정(Claude Pro·Max)으로 로그인하거나 API 키로 연결합니다. GPT·Gemini는 API 키로 연결합니다. 키는 이 컴퓨터의 ChartDesk 폴더(ai-keys.json)에만 저장되고, 해당 회사의 API 주소로만 보냅니다. 키 없이 쓰는 또 다른 방법은 아래의 "브리핑을 웹에서"입니다. 프롬프트를 복사해 드리고, 본인 계정으로 로그인한 웹 창에 붙여 넣어 보내는 방식입니다.' })];
 		for (const provider of PROVIDERS) {
-			const field = el('input', { type: 'password', placeholder: connected(provider.id) ? `연결됨 (${ status[provider.id].hint }) · 바꾸려면 새 키 입력` : 'API 키 붙여넣기', autocomplete: 'off' });
+			const account = provider.account && status[provider.id]?.account;
+			const using = via(provider.id);
+			const accountRows = [];
+			if (provider.account) {
+				const state = !account?.installed ? `${ provider.account.cli } 설치 안 됨`
+					: account.loggedIn ? `로그인됨${ account.plan ? ` (${ account.plan })` : '' }` : '로그인 필요';
+				const use = (mode) => {
+					settings.via[provider.id] = mode;
+					settings.provider = provider.id;
+					saveSettings();
+					showingKeys = false;
+					renderAll();
+					loadModels();
+				};
+				const actions = [];
+				if (!account?.installed) actions.push(el('a', { class: 'primary', href: provider.account.install, target: '_blank', rel: 'noopener', text: `${ provider.account.cli } 설치 안내` }));
+				else if (!account.loggedIn) {
+					actions.push(el('button', {
+						class: 'primary',
+						text: '로그인',
+						onclick: async() => {
+							try {
+								await api('/api/ai/login', { provider: provider.id });
+								APP.toast('터미널 창이 열렸습니다. 브라우저에서 로그인을 마친 뒤 "다시 확인"을 누르세요.');
+							}
+							catch (error) {
+								APP.toast(error.message);
+							}
+						},
+					}));
+				}
+				else if (using !== 'account') actions.push(el('button', { class: 'primary', text: '구독 계정으로 쓰기', onclick: () => use('account') }));
+				actions.push(el('button', {
+					class: 'text-btn',
+					text: '다시 확인',
+					onclick: async() => {
+						await refreshStatus();
+						renderAll();
+						loadModels();
+					},
+				}));
+				accountRows.push(
+					el('div', { class: 'ai-key-head' }, el('span', { text: `구독 계정 · ${ provider.account.cli }` }),
+						el('span', { class: account?.loggedIn ? 'up' : 'muted', text: using === 'account' && account?.loggedIn ? `${ state } · 사용 중` : state })),
+					el('small', { text: `이 컴퓨터의 ${ provider.account.cli }에 로그인한 ${ provider.account.plan } 계정으로 답을 받습니다. 사용량은 구독 한도에서 빠지고 API 요금은 들지 않습니다. 로그인 정보는 ${ provider.account.cli }가 보관하며 ChartDesk는 보지 않습니다.` }),
+					el('div', { class: 'ai-key-row' }, ...actions),
+					el('span', { class: 'ai-key-head' }, el('span', { text: 'API 키' }),
+						el('span', { class: status[provider.id]?.connected ? 'up' : 'muted', text: status[provider.id]?.connected ? `연결됨${ using === 'key' ? ' · 사용 중' : '' }` : '연결 안 됨' })));
+				if (status[provider.id]?.connected && using !== 'key') accountRows.push(el('div', { class: 'ai-key-row' }, el('button', { class: 'text-btn', text: 'API 키로 쓰기', onclick: () => use('key') })));
+			}
+			const field = el('input', { type: 'password', placeholder: status[provider.id]?.connected ? `연결됨 (${ status[provider.id].hint }) · 바꾸려면 새 키 입력` : 'API 키 붙여넣기', autocomplete: 'off' });
 			const set = async(key) => {
 				try {
 					await api('/api/ai/key', { provider: provider.id, key });
-					modelLists.delete(provider.id);
+					modelLists.delete(`${ provider.id }:key`);
 					if (key) {
 						// 모델 목록을 받아 키가 맞는지 확인한다. 틀린 키는 남겨 두지 않는다.
 						try {
-							modelLists.set(provider.id, (await api(`/api/ai/models?provider=${ provider.id }`)).models);
+							modelLists.set(`${ provider.id }:key`, (await api(`/api/ai/models?provider=${ provider.id }`)).models);
 						}
 						catch (error) {
 							await api('/api/ai/key', { provider: provider.id, key: '' });
@@ -504,7 +573,8 @@
 							return;
 						}
 						settings.provider = provider.id;
-						delete settings.models[provider.id];
+						settings.via[provider.id] = 'key';
+						delete settings.models[`${ provider.id }:key`];
 						saveSettings();
 						showingKeys = false;
 					}
@@ -522,6 +592,7 @@
 			rows.push(el('div', { class: 'ai-key' },
 				el('div', { class: 'ai-key-head' }, el('b', { text: `${ provider.label } (${ provider.company })` }),
 					el('span', { class: connected(provider.id) ? 'up' : 'muted', text: connected(provider.id) ? '연결됨' : '연결 안 됨' })),
+				...accountRows,
 				el('small', { text: `키 발급: ${ provider.where }` }),
 				el('div', { class: 'ai-key-row' }, field,
 					el('button', { class: 'primary', text: '연결', onclick: () => field.value.trim() && set(field.value) }),
@@ -721,7 +792,7 @@
 		renderAll();
 	});
 	modelSelect.addEventListener('change', () => {
-		settings.models[settings.provider] = modelSelect.value;
+		settings.models[listKey(settings.provider)] = modelSelect.value;
 		saveSettings();
 	});
 	const showKind = () => {
