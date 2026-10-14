@@ -250,7 +250,6 @@
 			extended: false,
 			indicators: defaultIndicators(),
 			favoriteIndicators: [],
-			seeded: [],
 			tabs: [tab],
 			activeTab: tab.id,
 			watchlist: [
@@ -293,7 +292,6 @@
 				extended: saved.extended === true,
 				indicators,
 				favoriteIndicators: Array.isArray(saved.favoriteIndicators) ? saved.favoriteIndicators.filter(id => IND.byId.has(id)) : [],
-				seeded: Array.isArray(saved.seeded) ? saved.seeded : [],
 				tabs,
 				activeTab: tabs.some(tab => tab.id === saved.activeTab) ? saved.activeTab : tabs[0].id,
 				watchlist: Array.isArray(saved.watchlist)
@@ -316,10 +314,6 @@
 	}
 
 	const state = loadState();
-	if (!state.seeded.includes('vpsr')) {
-		state.seeded.push('vpsr');
-		if (!state.indicators.some(item => item.type === 'vpsr')) state.indicators.push(newIndicator('vpsr'));
-	}
 	PROV.options.extended = state.extended;
 	let saveTimer = 0;
 	// 설정을 가져온 뒤 다시 불러오기 전까지는 지금 상태를 저장하지 않는다.
