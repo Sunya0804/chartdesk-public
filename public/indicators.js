@@ -1279,11 +1279,15 @@ window.ChartDeskIndicators = (() => {
 			else groups.push({ low: pivot.price, high: pivot.price, touches: 1, burst: pivot.burst, from: pivot.index, last: pivot.index });
 		}
 		const close = context.close ?? s.c[s.n - 1];
+		const unit = ranges[s.n - 1] ?? (high - low) * 0.01;
+		// 같은 가격대가 여러 묶음으로 쪼개져 있으면 하나씩은 약해 보이지만 함께 보면 단단한 자리다.
+		// 구간 가장자리에서 ATR 하나 안쪽의 전환점까지 닿은 횟수로 센다.
+		const nearby = group => groups.reduce((count, other) => (other.high >= group.low - unit && other.low <= group.high + unit ? count + other.touches : count), 0);
 		const zones = groups
 			.filter(group => group.touches >= 2)
 			.map((group) => {
 				const pad = tolerance * 0.15;
-				const zone = { low: group.low - pad, high: group.high + pad, touches: group.touches, from: s.t[group.from], last: s.t[group.last] };
+				const zone = { low: group.low - pad, high: group.high + pad, touches: nearby(group), from: s.t[group.from], last: s.t[group.last] };
 				// 구간 안을 잘게 나눠 어느 가격에 거래가 몰렸는지 본다.
 				const cellStep = (zone.high - zone.low) / ZONE_CELLS;
 				const cells = new Array(ZONE_CELLS).fill(0);
@@ -1306,7 +1310,7 @@ window.ChartDeskIndicators = (() => {
 				// 전환점에서 터진 거래량, 최근에 닿았는지를 0~1로 맞춰 더한다.
 				const density = zone.share / ((zone.high - zone.low) / (high - low));
 				const parts = {
-					touches: clamp(group.touches / 6),
+					touches: clamp(zone.touches / 8),
 					volume: clamp(density / 2.5),
 					burst: clamp((zone.burst - 0.5) / 2.5),
 					recent: clamp((group.last - from) / (s.n - from)),
@@ -1320,11 +1324,17 @@ window.ChartDeskIndicators = (() => {
 			.sort((a, b) => b.reliability - a.reliability);
 		// 신뢰도 순으로 고르되, 현재가 위(저항)와 아래(지지)를 각각 절반까지만 둔다.
 		// 한쪽에 몰려 화면을 덮지 않고, 가격이 지금 만날 수 있는 양쪽 구간이 함께 남는다.
+		// 이미 고른 구간과 ATR 2.5배 안으로 붙은 구간은 같은 자리로 보고 버린다(겹쳐 쌓이지 않게).
+		// 최소 신뢰도에 못 미치거나 닿은 횟수가 3번이 안 되는 구간은 그리지 않는다.
 		const limit = Math.max(1, Math.round(p.zones));
 		const perSide = Math.ceil(limit / 2);
+		const floor = (p.minrel ?? 50) / 100;
+		const gap = unit * 2.5;
 		const taken = { support: 0, resistance: 0, inside: 0 };
 		for (const zone of zones) {
-			if (result.zones.length >= limit) break;
+			if (result.zones.length >= limit || zone.reliability < floor) break;
+			if (zone.touches < 3) continue;
+			if (result.zones.some(other => zone.low - other.high < gap && other.low - zone.high < gap)) continue;
 			if (zone.kind === 'inside' ? taken.inside >= 1 : taken[zone.kind] >= perSide) continue;
 			taken[zone.kind]++;
 			result.zones.push(zone);
@@ -1511,6 +1521,7 @@ window.ChartDeskIndicators = (() => {
 			num('size', '매물대 폭 (차트의 %)', 10, 3, 1),
 			num('pivot', '전환점 좌우 봉 수', 5, 2, 1),
 			num('zones', '지지·저항 구간 수 (위·아래 절반씩)', 6, 1, 1),
+			num('minrel', '지지·저항 최소 신뢰도 % (낮추면 약한 구간도 보임)', 50, 0, 5),
 			num('basis', '지지·저항 기준 주기 (0 자동 · 1 차트 주기 · 2 1시간 · 3 4시간 · 4 일봉)', 0, 0, 1),
 			num('weekend', '주말 전환점 제외 (0 주식 토큰만 · 1 항상 · 2 안 함)', 0, 0, 1),
 		],
