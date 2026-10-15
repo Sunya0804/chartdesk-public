@@ -1813,7 +1813,7 @@ window.ChartDeskIndicators = (() => {
 		let yesterday = 0;
 		let hot = null;
 		// 봉을 아직 받지 못했으면 그릴 것이 없다.
-		if (s.n === 0) return { move, three, $colors: { three: [] }, $draw: { spans: [], marks: [], lines: [], upper, lower, top, bottom, events: [], plan: null } };
+		if (s.n === 0) return { move, three, $colors: { three: [] }, $draw: { spans: [], marks: [], lines: [], tones: [], upper, lower, top, bottom, events: [], plan: null } };
 		let was = { chaseShort: false, chaseLong: false, crash: false };
 		let plan = null;
 		let before = { stretch: null, place: null };
@@ -1926,40 +1926,59 @@ window.ChartDeskIndicators = (() => {
 		}
 		if (hot !== null) spans.push([hot, s.n - 1]);
 
+		// 왼쪽 아래 글 상자: 지금 장 상태와, 롱·숏을 볼 가격대와 피할 가격대. tones는 줄마다의 색(up, down, warn, 없으면 기본).
 		const last = s.n - 1;
+		const close = s.c[last];
+		const digits = close >= 1000 ? 1 : close >= 10 ? 2 : close >= 1 ? 4 : 6;
+		const price = value => value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 		const lines = [];
-		if (move[last] === null) lines.push('7일치 봉이 부족합니다. 주기를 올리거나 과거 봉을 더 불러오면 계산됩니다.');
+		const tones = [];
+		const say = (text, tone = null) => {
+			lines.push(text);
+			tones.push(tone);
+		};
+		if (move[last] === null) say('7일치 봉이 부족합니다. 주기를 올리거나 과거 봉을 더 불러오면 계산됩니다.');
 		else {
-			const value = move[last];
-			lines.push(value >= p.vol
-				? `7일 변동폭 ${ value.toFixed(1) }% · 고변동. 2019년 이후 수익의 약 84%(558개 포지션, +2,172 BTC)가 15% 이상 구간에서 나왔습니다.`
-				: value >= p.quiet
-					? `7일 변동폭 ${ value.toFixed(1) }% · 보통. 7~15% 구간의 324개 포지션은 손익비 1.18로 거의 본전이었습니다.`
-					: `7일 변동폭 ${ value.toFixed(1) }% · 저변동. 이 구간에서는 거의 매매하지 않았습니다(914개 중 32개).`);
+			const value = move[last].toFixed(1);
+			if (move[last] >= p.vol) say(`장 상태: 매매할 장 (7일 변동폭 ${ value }%) · 수익의 84%가 이런 장에서 나왔습니다.`, 'up');
+			else if (move[last] >= p.quiet) say(`장 상태: 애매한 장 (7일 변동폭 ${ value }%) · 이런 장에서는 거의 본전이었습니다. 크기를 줄이세요.`, 'warn');
+			else say(`장 상태: 쉬는 장 (7일 변동폭 ${ value }%) · 이런 장에서는 거의 매매하지 않았습니다.`, 'warn');
 		}
-		if (stretch[last] !== null) {
-			const value = stretch[last];
-			if (value >= p.stretch) lines.push(`20시간 평균보다 ATR ${ value.toFixed(1) }배 위 · 여기서 잡은 숏 101개는 승률 57%, 합계 -633 BTC였습니다. 급등을 바로 받아치는 숏이 가장 큰 손실원입니다.`);
-			else if (value <= -p.stretch) lines.push(`20시간 평균보다 ATR ${ Math.abs(value).toFixed(1) }배 아래 · 여기서 잡은 롱 104개는 합계 -148 BTC였습니다. 급락을 바로 받는 롱은 손실 구간입니다.`);
-			else if (value <= -1.5) lines.push(`20시간 평균보다 ATR ${ Math.abs(value).toFixed(1) }배 아래 · 롱 성과가 가장 좋았던 거리(-3~-1.5배: 76개, 손익비 4.6)입니다.`);
-			else lines.push(`20시간 평균과의 거리 ATR ${ value.toFixed(1) }배 · 과열 구간(±${ p.stretch }배) 안쪽입니다.`);
+		// 지금 자리에서 하지 말 것.
+		if (stretch[last] !== null && stretch[last] >= p.stretch) say(`지금 숏 금지 · 급등 중(평균보다 ATR ${ stretch[last].toFixed(1) }배 위). 급등을 받아치는 숏이 가장 큰 손실원이었습니다.`, 'down');
+		else if (stretch[last] !== null && stretch[last] <= -p.stretch) say(`지금 롱 금지 · 급락 중(평균보다 ATR ${ Math.abs(stretch[last]).toFixed(1) }배 아래). 떨어지는 칼날을 받는 롱은 손실 구간이었습니다.`, 'down');
+		else if (top[last] !== null && close > top[last]) say('지금 숏 금지 · 24시간 고점을 넘은 자리입니다. 여기서 잡은 숏은 합계 손실이었습니다.', 'down');
+		else if (top[last] !== null && close < bottom[last]) say('지금 롱 금지 · 24시간 저점을 깬 자리입니다. 여기서 잡은 롱은 합계 손실이었습니다.', 'down');
+		if (three[last] !== null && Math.abs(three[last]) <= 2) say(`숏 자제 · 3일 등락 ${ three[last] >= 0 ? '+' : '' }${ three[last].toFixed(1) }%로 방향이 없습니다.`, 'warn');
+		// 볼 만한 가격대: 성과가 좋았던 세 자리를 지금 가격으로 옮긴다.
+		if (mean !== null && range > 0 && stretch[last] !== null) {
+			const dipHigh = mean - 1.5 * range;
+			const dipLow = mean - p.stretch * range;
+			const inDip = close <= dipHigh && close > dipLow;
+			say(`롱 타점(눌림): ${ price(dipLow) } ~ ${ price(dipHigh) }${ inDip ? ' · 지금 이 구간' : '' } · 승률 79%, 손익비 4.6`, inDip ? 'up' : null);
+			if (top[last] !== null && top[last] > bottom[last]) {
+				const width = top[last] - bottom[last];
+				const rollLine = bottom[last] + 0.4 * width;
+				const trendLine = bottom[last] + 0.6 * width;
+				const inRoll = close <= rollLine && close >= bottom[last] && stretch[last] < -0.5;
+				const inTrend = close >= trendLine && close <= top[last] && stretch[last] >= 0.5;
+				say(`숏 타점(꺾임): ${ price(bottom[last]) } ~ ${ price(rollLine) }, 평균(${ price(mean) }) 아래일 때${ inRoll ? ' · 지금 이 구간' : '' } · 승률 79%, 손익비 6.0`, inRoll ? 'down' : null);
+				say(`롱 타점(추세): ${ price(trendLine) } ~ ${ price(top[last]) }, 평균(${ price(mean) }) 위일 때${ inTrend ? ' · 지금 이 구간' : '' } · 승률 73%, 손익비 4.3`, inTrend ? 'up' : null);
+			}
+			say(`금지선: ${ price(upper[last]) } 위에서 숏 ✕ · ${ price(lower[last]) } 아래에서 롱 ✕`);
 		}
-		else if (!hourly) lines.push('평균과의 거리는 1시간 이하 주기에서 계산됩니다.');
-		if (top[last] !== null) {
-			if (s.c[last] > top[last]) lines.push('직전 24시간 고점 위 · 여기서 잡은 숏 109개는 승률 62%, 합계 -426 BTC였습니다.');
-			else if (s.c[last] < bottom[last]) lines.push('직전 24시간 저점 아래 · 여기서 잡은 롱 98개는 합계 -101 BTC였습니다.');
-		}
-		if (three[last] !== null && Math.abs(three[last]) <= 2) lines.push(`3일 등락 ${ three[last] >= 0 ? '+' : '' }${ three[last].toFixed(1) }% · 방향이 없는 자리(±2%)에서 잡은 숏 98개는 합계 -167 BTC였습니다.`);
+		else if (!hourly) say('타점 가격대는 1시간 이하 주기에서 계산됩니다.');
 		if (plan && p.plan >= 1) {
 			const rule = WONYO_PLANS[plan.kind];
-			lines.push(`${ rule.name } 구간 · ${ rule.stat }. 크기는 ${ rule.size }. 추가는 유리한 방향으로만. 기계적으로 따라 하면 본전 수준이었으니 판단의 참고로만 쓰세요.`);
+			const done = plan.reached ? ` (목표 ${ plan.reached }까지 도달)` : '';
+			say(`진행 중: ${ rule.name } · 진입 ${ plan.entries.map(price).join(' / ') } · 목표 ${ plan.targets.map(price).join(' / ') }${ done } · 무효화 ${ price(plan.stop) } · 크기 ${ rule.size }`, rule.dir > 0 ? 'up' : 'down');
 		}
-		lines.push('참고: 불타기 +2,318 BTC · 물타기 -862 BTC · 잔고 4배 초과 -176 BTC · 이긴 포지션의 가격 이동 중앙값 0.39%, 진 포지션 -0.27%.');
+		say('지킬 것: 이길 때만 추가(물타기 ✕) · 잔고 4배 이하 · 통계일 뿐, 기계적으로 따라 하면 본전 수준이었습니다.', 'muted');
 		return {
 			move,
 			three,
 			$colors: { three: signed(three) },
-			$draw: { spans: spans.slice(-40), marks: marks.slice(-60), lines, upper, lower, top, bottom, events: p.plan >= 1 ? events.slice(-80) : [], plan: p.plan >= 1 && plan ? { ...plan, name: WONYO_PLANS[plan.kind].name } : null },
+			$draw: { spans: spans.slice(-40), marks: marks.slice(-60), lines, tones, upper, lower, top, bottom, events: p.plan >= 1 ? events.slice(-80) : [], plan: p.plan >= 1 && plan ? { ...plan, name: WONYO_PLANS[plan.kind].name } : null },
 		};
 	}
 
@@ -2067,13 +2086,30 @@ window.ChartDeskIndicators = (() => {
 			return;
 		}
 		context.textAlign = 'left';
-		const width = Math.min(view.width - 24, Math.max(...data.lines.map(text => context.measureText(text).width)) + 16);
-		const top = view.height - data.lines.length * 16 - 14;
-		context.fillStyle = 'rgba(0, 0, 0, 0.6)';
-		context.fillRect(8, top, width, data.lines.length * 16 + 8);
+		// 좁은 화면(휴대폰)에서는 글자를 줄이지 않고 줄을 바꾼다.
+		const room = Math.min(view.width - 40, 760);
+		const colors = { up: view.up, down: view.down, warn: '#f5a623', muted: 'rgba(200, 200, 200, 0.75)' };
+		const rows = [];
 		data.lines.forEach((text, i) => {
-			context.fillStyle = i === data.lines.length - 1 ? 'rgba(200, 200, 200, 0.75)' : view.text;
-			context.fillText(text, 16, top + 12 + i * 16, width - 16);
+			const color = colors[data.tones?.[i]] ?? view.text;
+			let row = '';
+			for (const word of text.split(' ')) {
+				const next = row ? `${ row } ${ word }` : word;
+				if (row && context.measureText(next).width > room) {
+					rows.push({ text: row, color });
+					row = `  ${ word }`;
+				}
+				else row = next;
+			}
+			rows.push({ text: row, color });
+		});
+		const width = Math.max(...rows.map(row => context.measureText(row.text).width)) + 16;
+		const top = view.height - rows.length * 16 - 14;
+		context.fillStyle = 'rgba(0, 0, 0, 0.6)';
+		context.fillRect(8, top, width, rows.length * 16 + 8);
+		rows.forEach((row, i) => {
+			context.fillStyle = row.color;
+			context.fillText(row.text, 16, top + 12 + i * 16);
 		});
 		context.restore();
 	}
