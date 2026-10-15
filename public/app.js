@@ -279,14 +279,21 @@
 	}
 
 	// 바 리플레이 모의 매매의 기본값. 시드는 원화 종목과 그 밖의 종목을 따로 기억한다.
-	const PAPER_DEFAULTS = { seedKrw: 10000000, seedUsd: 10000, fee: 0.05, leverage: 10, stop: 0, target: 0, size: 25 };
+	const PAPER_DEFAULTS = {
+		seedKrw: 10000000, seedUsd: 10000, fee: 0.05, leverage: 10, stop: 0, target: 0,
+		// 주문 방식(market, limit)과 주문 크기 방식(percent: size %, amount: 금액, qty: 개수)
+		orderType: 'market', sizeMode: 'percent', size: 25, amount: 1000, qty: 1,
+	};
 
 	function sanitizePaper(saved) {
 		const out = { ...PAPER_DEFAULTS };
 		for (const key of Object.keys(PAPER_DEFAULTS)) {
+			if (typeof PAPER_DEFAULTS[key] !== 'number') continue;
 			const value = Number(saved?.[key]);
 			if (Number.isFinite(value) && value >= 0) out[key] = value;
 		}
+		if (['market', 'limit'].includes(saved?.orderType)) out.orderType = saved.orderType;
+		if (['percent', 'amount', 'qty'].includes(saved?.sizeMode)) out.sizeMode = saved.sizeMode;
 		out.leverage = Math.min(125, Math.max(1, out.leverage));
 		return out;
 	}
@@ -1850,6 +1857,7 @@
 				const index = param.time === undefined ? -1 : barIndexAt(this.bars, param.time);
 				this.updateLegend(index >= 0 && this.bars[index].time === param.time ? index : undefined);
 				if (this.hovered && state.crosshairSync) broadcastCrosshair(this, param.time);
+				this.movePlus(param);
 			});
 			this.chart.subscribeClick(param => this.onChartClick(param));
 			this.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
@@ -1922,7 +1930,9 @@
 			this.zoomStack = [];
 			this.replayButton = el('button', { class: 'foot-btn', title: '바 리플레이: 고른 봉부터 한 봉씩 다시 보여 줍니다', text: '리플레이', onclick: () => this.toggleReplay() });
 			this.replayBar = el('div', { class: 'replay-bar', hidden: '' });
-			this.body.append(this.replayBar);
+			this.plusButton = el('button', { class: 'price-plus', hidden: '', title: '이 가격에 지정가 주문(리플레이 모의 매매) 또는 알림', text: '+' });
+			this.plusButton.addEventListener('click', () => this.openPlusMenu());
+			this.body.append(this.replayBar, this.plusButton);
 			const foot = el('div', { class: 'pane-foot' },
 				...RANGES.map(([label, interval, count]) =>
 					el('button', { class: 'foot-btn', text: label, onclick: () => this.setRange(interval, count) })),
@@ -1950,6 +1960,7 @@
 			});
 			this.body.addEventListener('mouseleave', () => {
 				this.hovered = false;
+				this.plusButton.hidden = true;
 				this.updateLegend();
 				broadcastCrosshair(this, undefined);
 			});
@@ -2950,19 +2961,31 @@
 			}
 		}
 
-		/** 모의 매매 주문. side: 1 매수(롱), -1 매도(숏) */
-		paperOrder(side) {
+		/** 지금 고른 주문 크기. */
+		paperSizing() {
+			const paper = state.paper;
+			const value = paper.sizeMode === 'amount' ? paper.amount : paper.sizeMode === 'qty' ? paper.qty : paper.size;
+			return { mode: paper.sizeMode, value };
+		}
+
+		/**
+		 * 모의 매매 주문. side: 1 매수(롱), -1 매도(숏). price를 주면 그 가격의 지정가, 없으면 주문 창에서 고른 방식대로.
+		 */
+		paperOrder(side, price = null) {
 			const account = this.replay?.account;
 			const bar = this.bars[this.bars.length - 1];
 			if (!account || !bar) return;
+			const limit = price ?? (state.paper.orderType === 'limit' ? Number(this.replay.limitPrice) : null);
 			try {
-				toast(account.order(side, state.paper.size / 100, bar.close, bar.time));
+				toast(limit === null
+					? account.market(side, this.paperSizing(), bar.close, bar.time)
+					: account.limit(side, this.paperSizing(), limit, bar.close, bar.time));
 			}
 			catch (error) {
 				toast(error.message);
 			}
 			this.showPaperMarks();
-			this.renderReplayBar();
+			this.refreshReplayInfo();
 		}
 
 		paperClose(fraction) {
@@ -2970,33 +2993,41 @@
 			const bar = this.bars[this.bars.length - 1];
 			if (!account || !bar) return;
 			try {
-				toast(account.close(fraction, bar.close, bar.time));
+				toast(account.close(fraction, bar.close, bar.time, '시장가 청산'));
 			}
 			catch (error) {
 				toast(error.message);
 			}
 			this.showPaperMarks();
-			this.renderReplayBar();
+			this.refreshReplayInfo();
 		}
 
-		/** 체결 표시와 평단·청산가·손절·익절 선. */
+		paperCancel(id) {
+			this.replay?.account?.cancel(id);
+			this.showPaperMarks();
+			this.refreshReplayInfo();
+		}
+
+		/** 체결 표시와 평단·청산가·손절·익절·대기 지정가 선. */
 		showPaperMarks() {
 			const account = this.replay?.account;
 			this.clearPaperMarks();
 			if (!account) return;
 			const colors = cssColors();
 			const markers = account.fills.map(fill => (fill.kind === 'open'
-				? { time: fill.time, position: fill.side > 0 ? 'belowBar' : 'aboveBar', color: fill.side > 0 ? colors.up : colors.down, shape: fill.side > 0 ? 'arrowUp' : 'arrowDown', text: fill.side > 0 ? (account.futures ? '롱' : '매수') : '숏' }
+				? { time: fill.time, position: fill.side > 0 ? 'belowBar' : 'aboveBar', color: fill.side > 0 ? colors.up : colors.down, shape: fill.side > 0 ? 'arrowUp' : 'arrowDown', text: `${ fill.how === '지정가' ? '지정 ' : '' }${ account.sideName(fill.side) }` }
 				: { time: fill.time, position: fill.side > 0 ? 'belowBar' : 'aboveBar', color: fill.pnl >= 0 ? colors.up : colors.down, shape: 'circle', text: `${ fill.reason } ${ fill.ret >= 0 ? '+' : '' }${ (fill.ret * 100).toFixed(1) }%` }));
 			if (markers.length) this.showTrades(markers.sort((a, b) => a.time - b.time));
-			const position = account.position;
-			if (!position) return;
 			const line = (price, color, title, style = LC.LineStyle.Dashed) => price && this.main.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title });
+			const position = account.position;
 			this.paperLines = [
-				line(position.entry, colors.text, `평단 ${ position.side > 0 ? (account.futures ? '롱' : '매수') : '숏' }`, LC.LineStyle.Solid),
-				line(account.liquidation(), colors.warn, '청산가'),
-				line(position.stopPrice, colors.down, '손절'),
-				line(position.targetPrice, colors.up, '익절'),
+				...account.orders.map(order => line(order.price, order.side > 0 ? colors.up : colors.down, `지정 ${ account.sideName(order.side) } ${ window.ChartDeskPaper.formatQty(order.qty) }`, LC.LineStyle.Dotted)),
+				...(position ? [
+					line(position.entry, colors.text, `평단 ${ position.side > 0 ? (account.futures ? '롱' : '매수') : '숏' }`, LC.LineStyle.Solid),
+					line(account.liquidation(), colors.warn, '청산가'),
+					line(position.stopPrice, colors.down, '손절'),
+					line(position.targetPrice, colors.up, '익절'),
+				] : []),
 			].filter(Boolean);
 		}
 
@@ -3006,12 +3037,16 @@
 			this.clearTrades();
 		}
 
+		paperMoney(value) {
+			const unit = this.paperUnit();
+			return `${ value.toLocaleString('ko-KR', { maximumFractionDigits: unit === '원' ? 0 : 2 }) } ${ unit }`;
+		}
+
 		/** 모의 매매 상태 줄: 자산, 수익률, 포지션. */
 		paperStatus() {
 			const account = this.replay.account;
 			const bar = this.bars[this.bars.length - 1];
-			const unit = this.paperUnit();
-			const money = value => `${ value.toLocaleString('ko-KR', { maximumFractionDigits: unit === '원' ? 0 : 2 }) } ${ unit }`;
+			const money = value => this.paperMoney(value);
 			const sum = account.summary(bar.close);
 			const parts = [`자산 ${ money(sum.equity) } (${ formatPercent(sum.ret * 100) })`];
 			const position = account.position;
@@ -3023,9 +3058,89 @@
 				const liq = account.liquidation();
 				if (liq) parts.push(`청산가 ${ formatPrice(liq, this.precision) }`);
 			}
-			else parts.push(`현금 ${ money(account.cash) }`);
+			parts.push(`주문 가능 ${ money(account.available()) }`);
 			if (sum.trades) parts.push(`거래 ${ sum.trades }회 · 승률 ${ (sum.winRate * 100).toFixed(0) }%`);
 			return parts.join(' · ');
+		}
+
+		/** 리플레이 막대에서 봉마다 바뀌는 부분(시각, 상태, 대기 주문)만 고친다. 입력 중인 칸은 그대로 둔다. */
+		refreshReplayInfo() {
+			const replay = this.replay;
+			const refs = this.replayRefs;
+			if (!replay || !refs) return;
+			const time = this.bars[this.bars.length - 1]?.time;
+			refs.pos.textContent = `${ time === undefined ? '' : new Date((time - TZ_OFFSET) * 1000).toLocaleString('ko-KR', { year: '2-digit', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) } · 남은 봉 ${ replay.all.length - 1 - replay.index }`;
+			const account = replay.account;
+			if (!account || !refs.status) return;
+			refs.status.textContent = this.paperStatus();
+			refs.orders.replaceChildren(...account.orders.map(order => el('span', { class: `paper-order ${ order.side > 0 ? 'up' : 'down' }` },
+				`지정 ${ account.sideName(order.side) } ${ window.ChartDeskPaper.formatQty(order.qty) } @ ${ formatPrice(order.price, this.precision) }`,
+				el('button', { class: 'x', title: '주문 취소', text: '×', onclick: () => this.paperCancel(order.id) }))));
+			refs.orders.hidden = account.orders.length === 0;
+		}
+
+		/** 주문 창: 시장가·지정가, 주문 크기(비율·금액·개수), 매수·매도 버튼. */
+		paperControls() {
+			const account = this.replay.account;
+			const paper = state.paper;
+			const futures = account.futures;
+			const button = (text, title, onClick, extra = '') => el('button', { class: `text-btn ${ extra }`, text, title, onclick: onClick });
+			const types = el('div', { class: 'seg paper-type' }, ...[['market', '시장가'], ['limit', '지정가']].map(([id, label]) => el('button', {
+				class: paper.orderType === id ? 'on' : '',
+				text: label,
+				onclick: () => {
+					paper.orderType = id;
+					save();
+					this.renderReplayBar();
+				},
+			})));
+			const last = this.bars[this.bars.length - 1];
+			this.replay.limitPrice ??= last?.close;
+			const price = el('input', { type: 'number', step: 'any', min: '0', value: String(this.replay.limitPrice ?? ''), class: 'paper-price', 'aria-label': '지정가', title: '지정가. 차트 오른쪽 가격 축 옆의 + 로도 고를 수 있습니다' });
+			price.addEventListener('input', () => {
+				this.replay.limitPrice = Number(price.value);
+			});
+			const now = button('현재가', '지정가에 지금 봉 종가 넣기', () => {
+				this.replay.limitPrice = this.bars[this.bars.length - 1]?.close;
+				price.value = String(this.replay.limitPrice);
+			});
+			const unit = this.paperUnit();
+			const modes = [['percent', '비율 %'], ['amount', `금액 (${ unit })`], ['qty', '개수']];
+			const mode = selectInput(paper.sizeMode, modes, (value) => {
+				paper.sizeMode = value;
+				save();
+				this.renderReplayBar();
+			});
+			mode.title = '주문 크기 방식. 비율은 주문 가능 현금의 %(반대 방향이면 포지션의 %), 금액은 넣을 증거금, 개수는 코인·주식·계약 수';
+			const key = paper.sizeMode === 'amount' ? 'amount' : paper.sizeMode === 'qty' ? 'qty' : 'size';
+			const amount = el('input', { type: 'number', step: 'any', min: '0', value: String(paper[key]), class: 'paper-amount', 'aria-label': '주문 크기' });
+			amount.addEventListener('input', () => {
+				const value = Number(amount.value);
+				if (value > 0) {
+					paper[key] = value;
+					save();
+				}
+			});
+			const quick = paper.sizeMode === 'percent'
+				? [10, 25, 50, 100].map(value => button(`${ value }%`, `주문 가능 현금의 ${ value }%`, () => {
+					paper.size = value;
+					amount.value = String(value);
+					save();
+				}, 'paper-quick'))
+				: [];
+			const limit = paper.orderType === 'limit';
+			this.replayRefs.status = el('div', { class: 'replay-row paper-status' });
+			this.replayRefs.orders = el('div', { class: 'replay-row paper-orders' });
+			return [
+				el('div', { class: 'replay-row' }, types, ...(limit ? [price, now] : []), mode, amount, ...quick),
+				el('div', { class: 'replay-row' },
+					el('button', { class: 'paper-buy', text: `${ limit ? '지정가 ' : '' }${ futures ? '롱 ▲' : '매수 ▲' }`, title: limit ? '지정가에 매수 주문을 겁니다' : '지금 봉 종가로 매수', onclick: () => this.paperOrder(1) }),
+					el('button', { class: 'paper-sell', text: `${ limit ? '지정가 ' : '' }${ futures ? '숏 ▼' : '매도 ▼' }`, title: limit ? '지정가에 매도 주문을 겁니다' : futures ? '지금 봉 종가로 숏 (롱이 있으면 그만큼 정리)' : '보유분을 지금 봉 종가로 매도', onclick: () => this.paperOrder(-1) }),
+					button('½ 청산', '포지션 절반을 시장가로 정리', () => this.paperClose(0.5)),
+					button('전체 청산', '포지션을 모두 시장가로 정리', () => this.paperClose(1))),
+				this.replayRefs.orders,
+				this.replayRefs.status,
+			];
 		}
 
 		renderReplayBar() {
@@ -3042,25 +3157,8 @@
 				replay.speed = Number(value);
 				if (replay.timer) this.playReplay(true);
 			});
-			const time = this.bars[this.bars.length - 1]?.time;
-			const rows = [];
-			const account = replay.account;
-			if (account) {
-				const futures = account.futures;
-				const size = selectInput(state.paper.size, [10, 25, 50, 100].map(value => [value, `${ value }%`]), (value) => {
-					state.paper.size = Number(value);
-					save();
-				});
-				size.title = '주문 크기: 쓸 수 있는 현금 중 넣을 비율 (반대 주문은 포지션 중 정리할 비율)';
-				rows.push(
-					el('div', { class: 'replay-row' },
-						el('button', { class: 'paper-buy', text: futures ? '롱 ▲' : '매수 ▲', title: '지금 봉 종가로 매수', onclick: () => this.paperOrder(1) }),
-						el('button', { class: 'paper-sell', text: futures ? '숏 ▼' : '매도 ▼', title: futures ? '지금 봉 종가로 숏 (롱이 있으면 그만큼 정리)' : '보유분을 지금 봉 종가로 매도', onclick: () => this.paperOrder(-1) }),
-						size,
-						button('½ 청산', '포지션 절반 정리', () => this.paperClose(0.5)),
-						button('전체 청산', '포지션 모두 정리', () => this.paperClose(1))),
-					el('div', { class: 'replay-row paper-status', text: this.paperStatus() }));
-			}
+			this.replayRefs = { pos: el('span', { class: 'replay-pos' }) };
+			const rows = replay.account ? this.paperControls() : [];
 			this.replayBar.replaceChildren(el('div', { class: 'replay-row' },
 				el('b', { text: '리플레이' }),
 				button('⟲', '다른 시작 봉 고르기', () => {
@@ -3078,9 +3176,10 @@
 				button(playing ? '⏸' : '▶', playing ? '멈춤' : '재생', () => this.playReplay(!playing)),
 				button('⏭', '한 봉 앞으로', () => this.stepReplay()),
 				speed,
-				el('span', { class: 'replay-pos', text: `${ time === undefined ? '' : new Date((time - TZ_OFFSET) * 1000).toLocaleString('ko-KR', { year: '2-digit', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) } · 남은 봉 ${ replay.all.length - 1 - replay.index }` }),
+				this.replayRefs.pos,
 				button('✕', '리플레이 끝내기', () => this.endReplay(true))), ...rows);
 			this.replayBar.hidden = false;
+			this.refreshReplayInfo();
 		}
 
 		playReplay(on) {
@@ -3104,11 +3203,10 @@
 			const bar = replay.all[replay.index];
 			this.bars.push(bar);
 			if (replay.account) {
-				const event = replay.account.onBar(bar);
-				if (event) {
-					toast(event);
-					this.playReplay(false);
-				}
+				const events = replay.account.onBar(bar);
+				for (const event of events) toast(event);
+				// 체결·청산이 일어나면 확인할 수 있게 재생을 멈춘다.
+				if (events.length && replay.timer) this.playReplay(false);
 				this.showPaperMarks();
 			}
 			const data = this.mainData();
@@ -3119,10 +3217,67 @@
 				if (at >= 0) compare.series.update({ time: compare.bars[at].time, value: compare.bars[at].close });
 			}
 			this.updateLegend();
-			this.renderReplayBar();
+			this.refreshReplayInfo();
 		}
 
-		/** 리플레이를 끝낸다. reload면 최신 봉을 다시 받고 실시간으로 돌아간다. */
+		// ----- 가격 축의 + 버튼 -----
+
+		/** 십자선이 가격 패널 위에 있으면 오른쪽 가격 축 옆에 + 버튼을 그 가격 높이로 띄운다. */
+		movePlus(param) {
+			if (!this.main || !param.point) return;
+			const y = param.point.y;
+			const height = this.chart.panes()[0]?.getHeight() ?? 0;
+			const price = this.main.coordinateToPrice(y);
+			if (y < 0 || y > height || price === null || !Number.isFinite(price)) {
+				this.plusButton.hidden = true;
+				return;
+			}
+			this.plusPrice = Number(price.toFixed(this.precision));
+			this.plusButton.style.top = `${ y - 10 }px`;
+			this.plusButton.style.left = `${ this.chart.timeScale().width() - 24 }px`;
+			this.plusButton.hidden = false;
+		}
+
+		/** + 버튼: 리플레이 모의 매매 중이면 그 가격의 지정가 주문, 아니면 그 가격의 알림. */
+		openPlusMenu() {
+			const price = this.plusPrice;
+			if (!Number.isFinite(price)) return;
+			const account = this.replay?.account;
+			const label = formatPrice(price, this.precision);
+			const rows = [el('p', { class: 'title', text: label })];
+			if (account) {
+				const sizing = this.paperSizing();
+				const sizeText = sizing.mode === 'percent' ? `${ sizing.value }%` : sizing.mode === 'amount' ? this.paperMoney(sizing.value) : `${ sizing.value }개`;
+				rows.push(
+					el('button', { class: 'menu-option plus-buy', text: `지정가 ${ account.sideName(1) } @ ${ label }`, onclick: () => {
+						closePopover();
+						this.paperOrder(1, price);
+					} }),
+					el('button', { class: 'menu-option plus-sell', text: `지정가 ${ account.sideName(-1) } @ ${ label }`, onclick: () => {
+						closePopover();
+						this.paperOrder(-1, price);
+					} }),
+					el('button', { class: 'menu-option', text: '주문 창의 지정가로 넣기', onclick: () => {
+						closePopover();
+						state.paper.orderType = 'limit';
+						this.replay.limitPrice = price;
+						this.renderReplayBar();
+					} }),
+					el('p', { class: 'hint', text: `주문 크기 ${ sizeText } (주문 창에서 바꿉니다). 지금가보다 불리한 쪽이면 바로 체결됩니다.` }));
+			}
+			else if (!this.replay) {
+				rows.push(el('button', { class: 'menu-option', text: `${ label }에 가격 알림 추가`, onclick: () => {
+					closePopover();
+					const last = this.lastPrice();
+					if (last !== undefined) addAlert(this.cfg.symbol, price, last);
+					toast(`알림을 만들었습니다: ${ symbolTitle(this.cfg.symbol) } ${ label }`);
+				} }));
+			}
+			else rows.push(el('p', { class: 'hint', text: '모의 매매로 시작한 리플레이에서 이 가격에 지정가 주문을 걸 수 있습니다.' }));
+			popover.className = 'popover';
+			openPopover(this.plusButton, ...rows);
+		}
+
 		/** 모의 매매 결과를 알린다. */
 		announcePaper() {
 			const account = this.replay?.account;
@@ -3134,6 +3289,7 @@
 			toast(`모의 매매 결과: ${ money(account.seed) } → ${ money(sum.equity) } (${ formatPercent(sum.ret * 100) }) · 거래 ${ sum.trades }회 · 승률 ${ (sum.winRate * 100).toFixed(0) }%${ account.position ? ' · 열린 포지션은 마지막 종가로 평가' : '' }`);
 		}
 
+		/** 리플레이를 끝낸다. reload면 최신 봉을 다시 받고 실시간으로 돌아간다. */
 		endReplay(reload = false) {
 			const wasActive = this.replay !== null || this.picking;
 			if (this.replay?.account && reload) this.announcePaper();

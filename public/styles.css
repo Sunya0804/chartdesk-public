@@ -996,3 +996,39 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 	.paper-field .paper-seed { width: 96px; }
 	.paper-field .paper-small { width: 48px; }
 }
+
+/* 가격 축 옆의 + 버튼 */
+.price-plus {
+	position: absolute;
+	z-index: 5;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border-radius: 50%;
+	background: var(--panel-2);
+	border: 1px solid var(--border);
+	color: var(--text);
+	font-size: 15px;
+	line-height: 1;
+	box-shadow: var(--shadow);
+}
+.price-plus:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+.popover .plus-buy { color: var(--up); }
+.popover .plus-sell { color: var(--down); }
+
+/* 모의 매매 주문 창 */
+.paper-type button { padding: 3px 10px; }
+.replay-row input.paper-price { width: 110px; height: 24px; padding: 0 6px; }
+.replay-row input.paper-amount { width: 84px; height: 24px; padding: 0 6px; }
+.replay-row select { height: 24px; }
+.replay-bar .paper-quick { min-width: 0; padding: 2px 6px; font-size: 11px; }
+.paper-orders { gap: 4px; }
+.paper-order { display: inline-flex; align-items: center; gap: 2px; padding: 1px 2px 1px 8px; border-radius: 999px; background: var(--panel-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.paper-order.up { color: var(--up); }
+.paper-order.down { color: var(--down); }
+.paper-order .x { padding: 0 5px; color: var(--muted); }
+.paper-order .x:hover { color: var(--text); }
+@media (max-width: 600px) {
+	.replay-row input.paper-price { width: 92px; }
+	.replay-row input.paper-amount { width: 70px; }
+}
