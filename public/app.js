@@ -606,6 +606,15 @@
 	}
 
 	function openPopover(anchor, ...content) {
+		// 모든 창의 오른쪽 위에 닫기 버튼을 둔다. 제목이 있으면 제목 줄에, 검색창으로 시작하면 그 옆에 붙인다.
+		const close = el('button', { class: 'pop-close', title: '닫기 (Esc)', 'aria-label': '닫기', text: '×', onclick: closePopover });
+		const [first] = content;
+		if (first instanceof HTMLElement && first.classList.contains('title')) {
+			first.classList.add('with-close');
+			first.append(close);
+		}
+		else if (first instanceof HTMLInputElement) content[0] = el('div', { class: 'pop-head' }, first, close);
+		else content.unshift(el('div', { class: 'pop-head' }, close));
 		popover.replaceChildren(...content);
 		popover.hidden = false;
 		const rect = anchor.getBoundingClientRect();

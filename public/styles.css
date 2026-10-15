@@ -958,3 +958,10 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 	.replay-bar { bottom: 8px; }
 	.cond .ind-pick { max-width: 120px; }
 }
+
+/* 창 닫기 버튼 */
+.popover .pop-close { flex: none; width: 26px; height: 26px; margin-left: auto; padding: 0; font-size: 18px; line-height: 1; color: var(--muted); }
+.popover .pop-close:hover { color: var(--text); background: var(--panel-3); }
+.popover .pop-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.popover .pop-head input { flex: 1; min-width: 0; padding: 6px 9px; }
+.popover .title.with-close { display: flex; align-items: center; gap: 8px; }
