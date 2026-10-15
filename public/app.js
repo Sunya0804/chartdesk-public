@@ -337,6 +337,7 @@
 			symbolMeta: {},
 			paneSizes: {},
 			paper: { ...PAPER_DEFAULTS },
+			replayPos: null,
 		};
 	}
 
@@ -380,6 +381,10 @@
 				symbolMeta: saved.symbolMeta && typeof saved.symbolMeta === 'object' ? saved.symbolMeta : {},
 				// 가격 패널(main)과 하단 지표 패널(지표 id)의 높이 비율. 모든 종목·차트가 함께 쓴다.
 				paper: sanitizePaper(saved.paper),
+				// 리플레이 막대를 옮겨 둔 자리(차트 폭·높이에 대한 비율). null이면 아래 가운데.
+				replayPos: saved.replayPos && Number.isFinite(saved.replayPos.x) && Number.isFinite(saved.replayPos.y)
+					? { x: Math.min(1, Math.max(0, saved.replayPos.x)), y: Math.min(1, Math.max(0, saved.replayPos.y)) }
+					: null,
 				paneSizes: Object.fromEntries(Object.entries(saved.paneSizes && typeof saved.paneSizes === 'object' ? saved.paneSizes : {})
 					.filter(([, size]) => Number.isFinite(size) && size > 0)),
 			};
@@ -1866,7 +1871,10 @@
 				this.liveButton.hidden = range.to >= this.bars.length - 1;
 			});
 			this.chartHost.addEventListener('wheel', event => this.handleAxisWheel(event), { capture: true, passive: false });
-			this.resizeObserver = new ResizeObserver(() => this.positionLegends());
+			this.resizeObserver = new ResizeObserver(() => {
+				this.positionLegends();
+				if (!this.replayBar.hidden) this.placeReplayBar();
+			});
 			// 패널 사이 경계를 끌면 이름표가 따라가고, 놓으면 높이를 저장한다.
 			this.chartHost.addEventListener('pointerdown', () => this.followPaneDrag(), true);
 			this.resizeObserver.observe(this.body);
@@ -2863,10 +2871,11 @@
 			this.body.classList.add('picking');
 			this.replayButton.classList.add('on');
 			this.replayBar.replaceChildren(
-				el('b', { text: '리플레이' }),
+				this.replayGrip('리플레이'),
 				el('span', { text: '시작할 봉을 차트에서 누르세요' }),
 				el('button', { class: 'text-btn', text: '취소 (Esc)', onclick: () => this.endReplay(true) }));
 			this.replayBar.hidden = false;
+			this.placeReplayBar();
 		}
 
 		onChartClick(param) {
@@ -2889,6 +2898,75 @@
 			this.chart.timeScale().scrollToRealTime();
 			this.updateLegend();
 			this.renderReplayBar();
+		}
+
+		/** 리플레이 막대의 손잡이. 끌어서 옮기고, 두 번 누르면 아래 가운데로 돌아간다. */
+		replayGrip(label) {
+			const grip = el('b', { class: 'replay-grip', title: '끌어서 옮기기 · 두 번 누르면 제자리', text: `⠿ ${ label }` });
+			grip.addEventListener('pointerdown', event => this.dragReplayBar(event));
+			grip.addEventListener('dblclick', () => {
+				state.replayPos = null;
+				save();
+				panes.forEach(pane => !pane.replayBar.hidden && pane.placeReplayBar());
+			});
+			return grip;
+		}
+
+		/** 저장된 자리에 막대를 놓는다. 좁은 화면(휴대폰)은 폭을 다 쓰고 위아래만 옮긴다. */
+		placeReplayBar() {
+			const bar = this.replayBar;
+			const pos = state.replayPos;
+			// 휴대폰 화면 규칙(styles.css의 max-width: 600px)과 같은 기준을 쓴다.
+			const narrow = matchMedia('(max-width: 600px)').matches;
+			bar.classList.toggle('moved', pos !== null);
+			if (!pos) {
+				for (const key of ['left', 'top', 'right', 'bottom', 'width', 'transform']) bar.style[key] = '';
+				return;
+			}
+			const width = this.body.clientWidth;
+			const height = this.body.clientHeight;
+			const top = Math.min(Math.max(0, pos.y * height), Math.max(0, height - bar.offsetHeight));
+			bar.style.top = `${ top }px`;
+			bar.style.bottom = 'auto';
+			bar.style.transform = 'none';
+			if (narrow) {
+				bar.style.left = '';
+				bar.style.right = '';
+				bar.style.width = '';
+				return;
+			}
+			bar.style.right = 'auto';
+			bar.style.width = 'max-content';
+			bar.style.left = `${ Math.min(Math.max(0, pos.x * width), Math.max(0, width - bar.offsetWidth)) }px`;
+		}
+
+		dragReplayBar(event) {
+			if (event.button !== 0) return;
+			event.preventDefault();
+			const bar = this.replayBar;
+			const box = this.body.getBoundingClientRect();
+			const start = bar.getBoundingClientRect();
+			const offset = { x: event.clientX - start.left, y: event.clientY - start.top };
+			const move = (moveEvent) => {
+				state.replayPos = {
+					x: Math.min(1, Math.max(0, (moveEvent.clientX - offset.x - box.left) / box.width)),
+					y: Math.min(1, Math.max(0, (moveEvent.clientY - offset.y - box.top) / box.height)),
+				};
+				this.placeReplayBar();
+			};
+			const done = () => {
+				window.removeEventListener('pointermove', move, true);
+				window.removeEventListener('pointerup', done, true);
+				window.removeEventListener('pointercancel', done, true);
+				bar.classList.remove('dragging');
+				save();
+				panes.forEach(pane => pane !== this && !pane.replayBar.hidden && pane.placeReplayBar());
+			};
+			bar.classList.add('dragging');
+			// 차트의 작도 처리가 이벤트를 막기 전에 받도록 캡처 단계에서 듣는다.
+			window.addEventListener('pointermove', move, true);
+			window.addEventListener('pointerup', done, true);
+			window.addEventListener('pointercancel', done, true);
 		}
 
 		/** 모의 매매에서 금액의 단위. */
@@ -2938,7 +3016,7 @@
 				this.renderReplayBar();
 			};
 			this.replayBar.replaceChildren(
-				el('div', { class: 'replay-row' }, el('b', { text: '모의 매매' }), el('span', { class: 'muted', text: `${ futures ? '선물 (롱·숏, 배율)' : '현물 (매수·매도)' } · 체결은 지금 봉의 종가` })),
+				el('div', { class: 'replay-row' }, this.replayGrip('모의 매매'), el('span', { class: 'muted', text: `${ futures ? '선물 (롱·숏, 배율)' : '현물 (매수·매도)' } · 체결은 지금 봉의 종가` })),
 				el('div', { class: 'replay-row' },
 					item('시드', seed, this.paperUnit()),
 					futures ? item('배율', leverage, '배') : '',
@@ -2954,6 +3032,7 @@
 					el('button', { class: 'text-btn', text: '✕', title: '리플레이 끝내기', onclick: () => this.endReplay(true) })),
 				el('p', { class: 'paper-note', text: '손절·익절은 진입가 대비 가격 변화 %입니다(0이면 쓰지 않음). 선물은 격리 증거금으로 계산하고, 청산가에 닿으면 증거금을 모두 잃습니다.' }));
 			this.replayBar.hidden = false;
+			this.placeReplayBar();
 			// 휴대폰에서는 키보드가 차트를 가리지 않게 바로 입력칸을 잡지 않는다.
 			if (!matchMedia('(pointer: coarse)').matches) {
 				seed.focus();
@@ -3160,7 +3239,7 @@
 			this.replayRefs = { pos: el('span', { class: 'replay-pos' }) };
 			const rows = replay.account ? this.paperControls() : [];
 			this.replayBar.replaceChildren(el('div', { class: 'replay-row' },
-				el('b', { text: '리플레이' }),
+				this.replayGrip('리플레이'),
 				button('⟲', '다른 시작 봉 고르기', () => {
 					clearInterval(replay.timer);
 					replay.timer = 0;
@@ -3179,6 +3258,7 @@
 				this.replayRefs.pos,
 				button('✕', '리플레이 끝내기', () => this.endReplay(true))), ...rows);
 			this.replayBar.hidden = false;
+			this.placeReplayBar();
 			this.refreshReplayInfo();
 		}
 
