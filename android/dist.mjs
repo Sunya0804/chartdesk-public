@@ -13,7 +13,8 @@ if (!existsSync(join(homedir(), ".chartdesk", "android-signing.properties"))) {
   process.exit(1);
 }
 const gradle = process.platform === "win32" ? "gradlew.bat" : "./gradlew";
-const result = spawnSync(gradle, ["assembleRelease", "--console=plain"], { cwd: here, stdio: "inherit", shell: process.platform === "win32" });
+// Windows의 .bat은 셸로만 돌릴 수 있다. 인자가 고정이라 명령 한 줄로 넘긴다.
+const result = spawnSync(`"${join(here, gradle)}" assembleRelease --console=plain`, { cwd: here, stdio: "inherit", shell: true });
 if (result.status !== 0) process.exit(result.status ?? 1);
 mkdirSync(join(here, "..", "dist"), { recursive: true });
 const target = join(here, "..", "dist", `ChartDesk-${version}.apk`);
