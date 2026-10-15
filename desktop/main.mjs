@@ -67,9 +67,29 @@ async function checkForUpdates() {
   return updateStatus;
 }
 
+/** 릴리스 노트(HTML 또는 버전별 목록)를 확인 창에 넣을 글로 바꾼다. 너무 길면 자른다. */
+function releaseNotesText(notes) {
+  const plain = (html) => String(html ?? "")
+    .replace(/<li>/gi, "• ")
+    .replace(/<\/(p|li|h\d)>|<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+  const parts = Array.isArray(notes)
+    ? notes.map((item) => `[${item.version}]\n${plain(item.note)}`)
+    : notes ? [plain(notes)] : [];
+  if (parts.length === 0) return "";
+  let text = parts.join("\n\n");
+  if (text.length > 1800) text = `${text.slice(0, 1800)}…\n(전체 내용은 다시 시작한 뒤 앱에서 볼 수 있습니다)`;
+  return `업데이트 내용\n${text}\n\n`;
+}
+
 function watchUpdates() {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  // latest.yml이 가리키는 최신 버전을 곧바로 받는다. 지금 버전 이후의 릴리스 노트를 모두 받아 확인 창에 보여 준다.
+  autoUpdater.fullChangelog = true;
   autoUpdater.on("checking-for-update", () => setStatus("업데이트 확인 중…"));
   autoUpdater.on("update-not-available", () => setStatus("최신 버전입니다"));
   autoUpdater.on("update-available", (info) => setStatus(`새 버전 ${info.version} 받는 중…`));
@@ -88,7 +108,7 @@ function watchUpdates() {
       cancelId: 1,
       title: "ChartDesk 업데이트",
       message: `새 버전 ${info.version}을 받았습니다.`,
-      detail: "지금 다시 시작하면 바로 적용됩니다. 나중을 고르면 앱을 끌 때 적용됩니다.",
+      detail: `${releaseNotesText(info.releaseNotes)}지금 다시 시작하면 바로 적용됩니다. 나중을 고르면 앱을 끌 때 적용됩니다.`,
     });
     if (response === 0) autoUpdater.quitAndInstall();
   });

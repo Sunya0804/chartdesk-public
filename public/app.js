@@ -3717,6 +3717,7 @@
 			el('p', { class: 'hint', text: '지표, 작도, 관심종목, 알림, 테마, AI 창 설정을 파일로 옮깁니다. AI API 키는 들어가지 않습니다. 가져오면 지금 설정을 덮어쓰고 화면을 다시 불러옵니다.' }),
 			syncSection(),
 			version,
+			el('button', { class: 'menu-option', 'data-action': 'changelog', text: '업데이트 내역', onclick: () => window.ChartDeskLab?.openChangelog() }),
 		];
 		if (desktop) {
 			const status = el('p', { class: 'version', text: desktop.updateStatus() });

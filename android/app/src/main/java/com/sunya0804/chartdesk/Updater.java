@@ -33,7 +33,9 @@ import java.util.function.Consumer;
  */
 final class Updater {
     static final String ACTION_INSTALL_STATUS = "com.sunya0804.chartdesk.INSTALL_STATUS";
+    // 늘 최신 릴리스 하나만 본다. 중간 버전을 거치지 않고 곧바로 최신 버전을 설치한다.
     private static final String LATEST = "https://api.github.com/repos/Sunya0804/chartdesk-public/releases/latest";
+    private static final String RELEASES = "https://api.github.com/repos/Sunya0804/chartdesk-public/releases?per_page=50";
     private static final long CHECK_EVERY_MS = 6 * 60 * 60 * 1000L;
 
     private final Activity activity;
@@ -45,6 +47,8 @@ final class Updater {
     // 내려받아 둔 새 버전. 설치를 미뤘으면 다음에 다시 묻는다.
     private File ready;
     private String readyVersion;
+    // 지금 버전 이후의 릴리스 노트(버전별). 설치할지 묻는 창에 보여 준다.
+    private String readyNotes = "";
     // 설치 권한을 주러 설정에 다녀오는 중.
     private boolean waitingForPermission;
 
@@ -92,20 +96,7 @@ final class Updater {
 
     private void run() throws Exception {
         setStatus("업데이트 확인 중…");
-        HttpURLConnection connection = (HttpURLConnection) new URL(LATEST).openConnection();
-        connection.setConnectTimeout(15000);
-        connection.setReadTimeout(15000);
-        connection.setRequestProperty("Accept", "application/vnd.github+json");
-        connection.setRequestProperty("User-Agent", "ChartDesk-Android");
-        JSONObject release;
-        try {
-            if (connection.getResponseCode() != 200) throw new IOException("GitHub 응답 " + connection.getResponseCode());
-            try (InputStream in = connection.getInputStream()) {
-                release = new JSONObject(new String(LocalServer.readAll(in), StandardCharsets.UTF_8));
-            }
-        } finally {
-            connection.disconnect();
-        }
+        JSONObject release = new JSONObject(fetch(LATEST));
         String version = release.getString("tag_name").replaceFirst("^v", "");
         if (!newer(version, BuildConfig.VERSION_NAME)) {
             setStatus("최신 버전입니다 (" + BuildConfig.VERSION_NAME + ")");
@@ -128,8 +119,52 @@ final class Updater {
         }
         ready = file;
         readyVersion = version;
+        try {
+            readyNotes = notesBetween(BuildConfig.VERSION_NAME, version);
+        } catch (Exception ignored) {
+            // 노트를 받지 못해도 설치는 할 수 있다.
+            readyNotes = "";
+        }
         setStatus("새 버전 " + version + " 설치 준비됨");
         activity.runOnUiThread(this::ask);
+    }
+
+    private static String fetch(String address) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(15000);
+        connection.setRequestProperty("Accept", "application/vnd.github+json");
+        connection.setRequestProperty("User-Agent", "ChartDesk-Android");
+        try {
+            if (connection.getResponseCode() != 200) throw new IOException("GitHub 응답 " + connection.getResponseCode());
+            try (InputStream in = connection.getInputStream()) {
+                return new String(LocalServer.readAll(in), StandardCharsets.UTF_8);
+            }
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    /** from보다 높고 to 이하인 버전의 릴리스 노트를 새 버전부터 차례로 모은다(1.0.8 → 1.0.10이면 1.0.10, 1.0.9). */
+    static String notesBetween(String from, String to) throws Exception {
+        JSONArray releases = new JSONArray(fetch(RELEASES));
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < releases.length(); i++) {
+            JSONObject release = releases.getJSONObject(i);
+            if (release.optBoolean("draft") || release.optBoolean("prerelease")) continue;
+            String version = release.optString("tag_name").replaceFirst("^v", "");
+            if (!newer(version, from) || newer(version, to)) continue;
+            // 마크다운 표시(**굵게**, ## 제목, `코드`)를 걷어 낸다.
+            String body = release.optString("body")
+                .replace("**", "")
+                .replace("`", "")
+                .replaceAll("(?m)^#+\\s*", "")
+                .replaceAll("(?m)^- ", "• ")
+                .trim();
+            if (out.length() > 0) out.append("\n\n");
+            out.append('[').append(version).append("]\n").append(body);
+        }
+        return out.toString();
     }
 
     private void download(String address, File file, long size) throws IOException {
@@ -157,7 +192,8 @@ final class Updater {
         if (activity.isFinishing() || ready == null) return;
         new AlertDialog.Builder(activity)
             .setTitle("ChartDesk 업데이트")
-            .setMessage("새 버전 " + readyVersion + "을 내려받았습니다. 지금 설치할까요?\n(설치하면 앱이 닫힙니다. 다시 열면 새 버전입니다.)")
+            .setMessage("새 버전 " + readyVersion + "을 내려받았습니다. 지금 설치할까요?\n(설치하면 앱이 닫힙니다. 다시 열면 새 버전입니다.)"
+                + (readyNotes.isEmpty() ? "" : "\n\n업데이트 내용\n" + readyNotes))
             .setPositiveButton("설치", (dialog, which) -> install())
             .setNegativeButton("나중에", null)
             .show();

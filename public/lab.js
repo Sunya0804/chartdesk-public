@@ -730,5 +730,66 @@ window.ChartDeskLab = (() => {
 
 	document.getElementById('screener-btn')?.addEventListener('click', openScreener);
 
-	return { condEditor, condList, openBacktest, openScreener, close: () => (modal ? (closeModal(), true) : false) };
+	// ---------- 업데이트 내용 ----------
+
+	const CHANGELOG = window.ChartDeskChangelog ?? [];
+	const SEEN_KEY = 'chartdesk-seen-version';
+
+	/** a가 b보다 높은 버전인가. 1.0.10 > 1.0.9 */
+	function newer(a, b) {
+		const [x, y] = [a.split('.').map(Number), b.split('.').map(Number)];
+		for (let i = 0; i < Math.max(x.length, y.length); i++) {
+			if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+		}
+		return false;
+	}
+
+	const currentVersion = () => window.chartdeskApp?.version ?? CHANGELOG[0]?.version ?? '';
+
+	/** 업데이트 내용 창. from이 있으면 그 버전보다 높은 버전만 보여 준다. */
+	function openChangelog(from = null) {
+		const current = currentVersion();
+		const entries = CHANGELOG.filter(entry => !newer(entry.version, current) && (!from || newer(entry.version, from)));
+		const list = el('div', { class: 'changelog' });
+		const render = (items) => {
+			list.replaceChildren(...items.map(entry => el('section', { class: 'lab-section' },
+				el('h3', {}, `${ entry.version }`, el('small', { text: ` ${ entry.date }` })),
+				el('ul', {}, ...entry.notes.map(note => el('li', { text: note }))))));
+		};
+		render(entries);
+		const all = el('button', { class: 'text-btn', text: '이전 버전 내역도 보기' });
+		all.addEventListener('click', () => {
+			render(CHANGELOG.filter(entry => !newer(entry.version, current)));
+			all.remove();
+		});
+		openModal(from ? `업데이트 내용 · ${ from } → ${ current }` : `업데이트 내역 · 지금 ${ current }`,
+			from ? el('p', { class: 'hint', text: `${ from }에서 ${ current }로 올라오면서 바뀐 내용입니다. 톱니바퀴 → 업데이트 내역에서 다시 볼 수 있습니다.` }) : '',
+			list,
+			from && entries.length < CHANGELOG.length ? el('div', { class: 'lab-row' }, all) : '');
+	}
+
+	/** 새 버전으로 처음 켰으면 전에 쓰던 버전 이후의 내용을 보여 준다. */
+	function showWhatsNew() {
+		const current = currentVersion();
+		if (!current) return;
+		let seen = null;
+		let existing = false;
+		try {
+			seen = localStorage.getItem(SEEN_KEY);
+			existing = localStorage.getItem('chartdesk.workspace.v1') !== null;
+			localStorage.setItem(SEEN_KEY, current);
+		}
+		catch {
+			return;
+		}
+		// 이 기능이 생기기 전 버전에서 올라온 경우는 이전 버전을 알 수 없어 이번 버전 내용만 보여 준다.
+		if (!seen && existing) {
+			const index = CHANGELOG.findIndex(entry => entry.version === current);
+			seen = CHANGELOG[index + 1]?.version ?? null;
+		}
+		if (seen && newer(current, seen)) openChangelog(seen);
+	}
+	setTimeout(showWhatsNew, 800);
+
+	return { condEditor, condList, openBacktest, openScreener, openChangelog, close: () => (modal ? (closeModal(), true) : false) };
 })();
