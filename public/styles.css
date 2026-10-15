@@ -847,3 +847,13 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 
 .ai-kind { height: 28px; max-width: 150px; }
 .ai-quick { flex-wrap: wrap; }
+
+/* 설정 창의 GitHub 동기화 */
+.popover.app-menu { width: 280px; }
+.popover .sync { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.popover .sync-link { display: inline-block; color: var(--accent); text-decoration: none; }
+.popover .sync-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.popover .sync-row input { flex: 1; min-width: 0; padding: 5px 8px; }
+.popover .sync-row .text-btn { padding: 3px 8px; }
+.toast.sync-ask { border-left-color: var(--accent); }
+.toast .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }

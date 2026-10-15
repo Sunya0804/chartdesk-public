@@ -48,6 +48,7 @@ node server.mjs
 
 - 지표, 작도, 관심종목, 테마, 알림 같은 설정은 브라우저(또는 앱) 안에 저장됩니다. 브라우저판과 앱, PC마다 따로입니다.
 - 톱니바퀴의 **설정 내보내기·가져오기**로 이 설정을 파일 하나로 옮길 수 있습니다. AI API 키는 들어가지 않습니다.
+- 톱니바퀴의 **GitHub 동기화**에 gist 권한만 준 GitHub 토큰([만들기](https://github.com/settings/tokens/new?scopes=gist&description=ChartDesk%20sync))을 넣으면, 같은 토큰을 넣은 PC와 휴대폰이 설정을 비공개 Gist 하나(`chartdesk-settings.json`)로 맞춥니다. 앱을 켤 때, 앱으로 돌아올 때, 설정을 바꾸고 15초 뒤에 자동으로 맞추고, 양쪽에서 모두 바뀌었으면 어느 쪽을 쓸지 묻습니다. 토큰은 그 기기에만 저장되고 설정 파일과 Gist에는 들어가지 않습니다.
 - AI API 키는 브라우저판은 `ai-keys.json`(git 제외), 앱은 `%APPDATA%\ChartDesk\ai-keys.json`, 안드로이드 앱은 앱 전용 저장소에 저장됩니다.
 
 ## 새 버전 내기

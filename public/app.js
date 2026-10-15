@@ -200,7 +200,14 @@
 
 	function sanitizeIndicators(saved) {
 		if (Array.isArray(saved)) {
-			return saved.filter(item => item && IND.byId.has(item.type)).map(item => newIndicator(item.type, item));
+			// 저장된 id를 그대로 둔다. 불러올 때마다 바뀌면 설정이 바뀐 것으로 보여 Gist 동기화가 매번 올린다.
+			const ids = new Set();
+			return saved.filter(item => item && IND.byId.has(item.type)).map((item) => {
+				const indicator = newIndicator(item.type, item);
+				if (typeof item.id === 'string' && item.id && !ids.has(item.id)) indicator.id = item.id;
+				ids.add(indicator.id);
+				return indicator;
+			});
 		}
 		// 처음 버전은 켜고 끄는 네 가지 지표만 저장했다.
 		const legacy = saved ?? {};
@@ -318,10 +325,13 @@
 	let saveTimer = 0;
 	// 설정을 가져온 뒤 다시 불러오기 전까지는 지금 상태를 저장하지 않는다.
 	let savingFrozen = false;
+	// 저장할 때마다 부른다(Gist 자동 동기화).
+	let onSave = null;
 
 	function save() {
 		clearTimeout(saveTimer);
 		if (savingFrozen) return;
+		onSave?.();
 		saveTimer = setTimeout(() => {
 			try {
 				localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -2625,22 +2635,59 @@
 	const SETTINGS_PREFIX = 'chartdesk.';
 	const SETTINGS_FORMAT = 'chartdesk-settings';
 
-	function exportSettings() {
-		closePopover();
-		clearTimeout(saveTimer);
+	/** 지금 설정(chartdesk.* 값)을 모은다. 예약된 저장을 먼저 끝낸다. 읽지 못하면 null. */
+	function snapshotSettings() {
 		const storage = {};
 		try {
-			localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+			if (!savingFrozen) {
+				clearTimeout(saveTimer);
+				localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+			}
 			for (let i = 0; i < localStorage.length; i++) {
 				const key = localStorage.key(i);
 				if (key.startsWith(SETTINGS_PREFIX)) storage[key] = localStorage.getItem(key);
 			}
 		}
 		catch {
+			return null;
+		}
+		return storage;
+	}
+
+	const settingsFile = storage => JSON.stringify({ format: SETTINGS_FORMAT, version: 1, exportedAt: new Date().toISOString(), storage }, null, 2);
+
+	/** 설정 파일의 내용에서 옮길 값만 고른다. ChartDesk 설정이 아니면 null. */
+	function settingsEntries(parsed) {
+		const entries = parsed?.format === SETTINGS_FORMAT && parsed.storage && typeof parsed.storage === 'object'
+			? Object.entries(parsed.storage).filter(([key, value]) => key.startsWith(SETTINGS_PREFIX) && typeof value === 'string')
+			: [];
+		return entries.some(([key]) => key === STORAGE_KEY) ? entries : null;
+	}
+
+	/** 가져온 값을 저장하고 화면을 다시 불러온다. exact면 가져온 값에 없는 설정은 지운다. */
+	function applySettings(entries, exact = false) {
+		// 가져온 값이 저장 중인 현재 상태에 덮이지 않게, 예약된 저장을 취소하고 다시 읽는다.
+		clearTimeout(saveTimer);
+		if (exact) {
+			const keep = new Set(entries.map(([key]) => key));
+			for (let i = localStorage.length - 1; i >= 0; i--) {
+				const key = localStorage.key(i);
+				if (key.startsWith(SETTINGS_PREFIX) && !keep.has(key)) localStorage.removeItem(key);
+			}
+		}
+		for (const [key, value] of entries) localStorage.setItem(key, value);
+		savingFrozen = true;
+		location.reload();
+	}
+
+	function exportSettings() {
+		closePopover();
+		const storage = snapshotSettings();
+		if (!storage) {
 			toast('설정을 읽지 못했습니다.');
 			return;
 		}
-		const body = JSON.stringify({ format: SETTINGS_FORMAT, version: 1, exportedAt: new Date().toISOString(), storage }, null, 2);
+		const body = settingsFile(storage);
 		const link = el('a', {
 			href: URL.createObjectURL(new Blob([body], { type: 'application/json' })),
 			download: `chartdesk-settings_${ new Date().toISOString().slice(0, 10) }.json`,
@@ -2663,26 +2710,367 @@
 				toast('설정 파일을 읽지 못했습니다. JSON 형식이 아닙니다.');
 				return;
 			}
-			const entries = parsed?.format === SETTINGS_FORMAT && parsed.storage && typeof parsed.storage === 'object'
-				? Object.entries(parsed.storage).filter(([key, value]) => key.startsWith(SETTINGS_PREFIX) && typeof value === 'string')
-				: [];
-			if (!entries.some(([key]) => key === STORAGE_KEY)) {
+			const entries = settingsEntries(parsed);
+			if (!entries) {
 				toast('ChartDesk 설정 파일이 아닙니다.');
 				return;
 			}
 			try {
-				// 가져온 값이 저장 중인 현재 상태에 덮이지 않게, 예약된 저장을 취소하고 다시 읽는다.
-				clearTimeout(saveTimer);
-				for (const [key, value] of entries) localStorage.setItem(key, value);
+				applySettings(entries);
 			}
 			catch {
 				toast('설정을 저장하지 못했습니다.');
-				return;
 			}
-			savingFrozen = true;
-			location.reload();
 		});
 		input.click();
+	}
+
+	// ---------- GitHub Gist 동기화 ----------
+	// 설정 파일과 같은 내용을 사용자의 비공개 Gist 하나(chartdesk-settings.json)에 두고 PC와 휴대폰이 같이 쓴다.
+	// 토큰과 동기화 기록은 'chartdesk-sync'에 둔다. 'chartdesk.'로 시작하지 않아 설정 파일과 Gist에는 들어가지 않는다.
+	// 마지막으로 맞춘 내용의 해시(base)와 비교해 한쪽만 바뀌었으면 그쪽을 따르고, 둘 다 바뀌었으면 사용자에게 묻는다.
+	const SYNC_KEY = 'chartdesk-sync';
+	const SYNC_FILE = 'chartdesk-settings.json';
+	const SYNC_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&description=ChartDesk%20sync';
+
+	function loadSync() {
+		try {
+			const saved = JSON.parse(localStorage.getItem(SYNC_KEY));
+			if (saved && typeof saved.token === 'string') return saved;
+		}
+		catch {
+			// 기록이 없거나 깨졌으면 연결하지 않은 것으로 본다.
+		}
+		return null;
+	}
+
+	let sync = loadSync();
+
+	function saveSync() {
+		try {
+			if (sync) localStorage.setItem(SYNC_KEY, JSON.stringify(sync));
+			else localStorage.removeItem(SYNC_KEY);
+		}
+		catch {
+			// 저장하지 못하면 다음 실행에서 다시 연결하면 된다.
+		}
+	}
+
+	/** 저장한 순서와 상관없이 같은 설정이면 같은 값이 나오는 해시. */
+	function settingsHash(storage) {
+		const text = JSON.stringify(Object.keys(storage).sort().map(key => [key, storage[key]]));
+		let hash = 0x811c9dc5;
+		for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+		return `${ (hash >>> 0).toString(16) }-${ text.length }`;
+	}
+
+	class SyncError extends Error {
+		constructor(message, status = 0) {
+			super(message);
+			this.status = status;
+		}
+	}
+
+	async function github(path, options = {}) {
+		let response;
+		try {
+			response = await fetch(`https://api.github.com${ path }`, {
+				...options,
+				cache: 'no-store',
+				headers: {
+					Accept: 'application/vnd.github+json',
+					Authorization: `Bearer ${ sync.token }`,
+					'X-GitHub-Api-Version': '2022-11-28',
+					...(options.body ? { 'Content-Type': 'application/json' } : {}),
+				},
+			});
+		}
+		catch {
+			throw new SyncError('GitHub에 연결하지 못했습니다. 인터넷 연결을 확인하세요.');
+		}
+		if (response.status === 401) throw new SyncError('GitHub 토큰이 맞지 않거나 만료되었습니다. 연결을 해제하고 새 토큰으로 연결하세요.', 401);
+		if (response.status === 403) throw new SyncError('GitHub가 요청을 거부했습니다. 토큰에 gist 권한이 있는지 확인하세요.', 403);
+		if (response.status === 404) throw new SyncError('Gist를 찾지 못했습니다.', 404);
+		if (!response.ok) throw new SyncError(`GitHub 오류 (${ response.status })`, response.status);
+		return response.json();
+	}
+
+	/** Gist에 올라간 설정. 아직 없으면 null. */
+	async function fetchRemote() {
+		let gist = null;
+		if (sync.gistId) {
+			try {
+				gist = await github(`/gists/${ sync.gistId }`);
+			}
+			catch (error) {
+				// 다른 곳에서 Gist를 지웠으면 다시 찾는다.
+				if (error.status !== 404) throw error;
+			}
+		}
+		if (!gist?.files?.[SYNC_FILE]) {
+			gist = null;
+			for (let page = 1; page <= 10 && !gist; page++) {
+				const list = await github(`/gists?per_page=100&page=${ page }`);
+				const found = list.find(item => item.files?.[SYNC_FILE]);
+				if (found) gist = await github(`/gists/${ found.id }`);
+				if (list.length < 100) break;
+			}
+		}
+		sync.gistId = gist?.id ?? null;
+		if (!gist) return null;
+		const file = gist.files[SYNC_FILE];
+		let text = file.content;
+		// 1MB가 넘으면 API 응답에서 잘리므로 원본 주소에서 받는다.
+		if (file.truncated) {
+			try {
+				text = await (await fetch(file.raw_url, { cache: 'no-store' })).text();
+			}
+			catch {
+				throw new SyncError('Gist의 설정 파일을 받지 못했습니다.');
+			}
+		}
+		let entries = null;
+		try {
+			entries = settingsEntries(JSON.parse(text));
+		}
+		catch {
+			// 아래에서 알린다.
+		}
+		if (!entries) throw new SyncError(`Gist의 ${ SYNC_FILE }이 ChartDesk 설정 파일이 아닙니다.`);
+		return { entries, hash: settingsHash(Object.fromEntries(entries)) };
+	}
+
+	async function pushRemote(storage) {
+		const files = { [SYNC_FILE]: { content: settingsFile(storage) } };
+		const gist = sync.gistId
+			? await github(`/gists/${ sync.gistId }`, { method: 'PATCH', body: JSON.stringify({ files }) })
+			: await github('/gists', { method: 'POST', body: JSON.stringify({ description: 'ChartDesk 설정 동기화', public: false, files }) });
+		sync.gistId = gist.id;
+	}
+
+	function syncDone(hash) {
+		sync.base = hash;
+		sync.syncedAt = Date.now();
+		sync.error = null;
+		saveSync();
+	}
+
+	let syncing = null;
+	let syncPrompt = null;
+
+	/**
+	 * mode가 'auto'면 바뀐 쪽을 따른다. 'push'는 이 기기 설정을 올리고 'pull'은 Gist 설정을 받는다.
+	 * 결과를 글로 돌려준다. 설정을 받으면 화면을 다시 불러온다.
+	 */
+	function runSync(mode = 'auto') {
+		if (!sync) return Promise.resolve('GitHub에 연결되어 있지 않습니다.');
+		if (syncing) return syncing;
+		syncing = (async () => {
+			try {
+				const local = snapshotSettings();
+				if (!local) throw new SyncError('설정을 읽지 못했습니다.');
+				const localHash = settingsHash(local);
+				const remote = await fetchRemote();
+				if (mode === 'pull') return remote ? receive(remote) : '아직 올린 설정이 없습니다.';
+				if (mode === 'push' || !remote) {
+					await pushRemote(local);
+					syncDone(localHash);
+					return '이 기기의 설정을 올렸습니다.';
+				}
+				if (remote.hash === localHash) {
+					syncDone(localHash);
+					return '설정이 같습니다.';
+				}
+				const localChanged = localHash !== sync.base;
+				const remoteChanged = remote.hash !== sync.base;
+				if (remoteChanged && !localChanged) return receive(remote);
+				if (localChanged && !remoteChanged) {
+					await pushRemote(local);
+					syncDone(localHash);
+					return '이 기기의 설정을 올렸습니다.';
+				}
+				saveSync();
+				// 처음 연결한 기기는 맞춘 적이 없어서 어느 쪽이 새 설정인지 알 수 없다.
+				const message = sync.base
+					? '이 기기와 다른 기기에서 모두 설정이 바뀌었습니다. 어느 쪽을 쓸까요?'
+					: 'Gist에 다른 기기의 설정이 있습니다. 어느 쪽을 쓸까요?';
+				askConflict(message);
+				return message;
+			}
+			catch (error) {
+				const message = error instanceof SyncError ? error.message : `동기화하지 못했습니다: ${ error.message }`;
+				if (sync) {
+					sync.error = message;
+					saveSync();
+				}
+				throw new SyncError(message);
+			}
+			finally {
+				syncing = null;
+			}
+		})();
+		return syncing;
+	}
+
+	function receive(remote) {
+		syncDone(remote.hash);
+		try {
+			sessionStorage.setItem(SYNC_KEY, '1');
+		}
+		catch {
+			// 다시 불러온 뒤 알림만 못 띄운다.
+		}
+		applySettings(remote.entries, true);
+		return '다른 기기의 설정을 받았습니다.';
+	}
+
+	/** 양쪽이 모두 바뀌었을 때 어느 쪽을 쓸지 묻는다. 고를 때까지 자동 동기화를 멈춘다. */
+	function askConflict(message) {
+		if (syncPrompt) return;
+		const choose = mode => async () => {
+			syncPrompt?.remove();
+			syncPrompt = null;
+			try {
+				toast(await runSync(mode));
+			}
+			catch (error) {
+				toast(error.message);
+			}
+		};
+		syncPrompt = el('div', { class: 'toast sync-ask' },
+			el('div', { text: message }),
+			el('div', { class: 'actions' },
+				el('button', { class: 'text-btn', text: '이 기기 설정 올리기', onclick: choose('push') }),
+				el('button', { class: 'text-btn', text: '다른 기기 설정 받기', onclick: choose('pull') }),
+			),
+		);
+		$('toasts').append(syncPrompt);
+	}
+
+	// 자동 동기화: 켤 때, 화면으로 돌아올 때, 5분마다, 설정을 바꾸고 15초 뒤에 맞춘다.
+	let autoSyncTimer = 0;
+	let lastAutoSync = 0;
+
+	function autoSync(delay = 0) {
+		clearTimeout(autoSyncTimer);
+		if (!sync || sync.auto === false || savingFrozen) return;
+		autoSyncTimer = setTimeout(() => {
+			if (!sync || syncPrompt || savingFrozen || document.visibilityState !== 'visible') return;
+			lastAutoSync = Date.now();
+			runSync('auto').catch(() => {
+				// 오류는 설정 창의 동기화 상태에 보인다.
+			});
+		}, delay);
+	}
+
+	onSave = () => autoSync(15000);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'visible' && Date.now() - lastAutoSync > 30000) autoSync(500);
+	});
+	setInterval(() => autoSync(), 5 * 60 * 1000);
+	autoSync(1500);
+	try {
+		if (sessionStorage.getItem(SYNC_KEY)) {
+			sessionStorage.removeItem(SYNC_KEY);
+			toast('다른 기기의 설정을 받았습니다.');
+		}
+	}
+	catch {
+		// sessionStorage를 못 쓰면 알림만 생략한다.
+	}
+
+	async function connectSync(token) {
+		sync = { token, auto: true, gistId: null, base: null };
+		try {
+			sync.login = (await github('/user')).login;
+		}
+		catch (error) {
+			sync = null;
+			throw error;
+		}
+		saveSync();
+		return runSync('auto');
+	}
+
+	/** 설정 창의 'GitHub 동기화' 부분 */
+	function syncSection() {
+		const status = el('p', { class: 'hint' });
+		const box = el('div', { class: 'sync' }, el('p', { class: 'title', text: 'GitHub 동기화' }));
+		if (!sync) {
+			const input = el('input', { type: 'password', placeholder: 'GitHub 토큰 (ghp_…)', autocomplete: 'off', spellcheck: 'false' });
+			const connect = el('button', { class: 'primary', text: '연결' });
+			const submit = async () => {
+				const token = input.value.trim();
+				if (!token) return;
+				connect.disabled = true;
+				status.textContent = '연결 중…';
+				let result;
+				try {
+					result = await connectSync(token);
+				}
+				catch (error) {
+					// 토큰은 맞았는데 동기화가 실패했으면 연결된 화면에서 오류를 보여 준다.
+					if (!sync) {
+						status.textContent = error.status === 401 ? 'GitHub 토큰이 맞지 않습니다. 토큰을 다시 확인하세요.' : error.message;
+						connect.disabled = false;
+						return;
+					}
+				}
+				const next = syncSection();
+				if (result) next.querySelector('.sync-status').textContent = result;
+				box.replaceWith(next);
+			};
+			connect.addEventListener('click', submit);
+			input.addEventListener('keydown', (event) => {
+				if (event.key === 'Enter') submit();
+			});
+			box.append(
+				el('p', { class: 'hint', text: 'PC와 휴대폰에 같은 GitHub 토큰을 넣으면 설정을 비공개 Gist 하나로 맞춥니다. 토큰에는 gist 권한만 주면 되고, 토큰은 이 기기에만 저장됩니다.' }),
+				el('a', { class: 'hint sync-link', href: SYNC_TOKEN_URL, target: '_blank', rel: 'noopener', text: '토큰 만들기 (GitHub) ↗' }),
+				el('div', { class: 'sync-row' }, input, connect),
+				status,
+			);
+			return box;
+		}
+		status.classList.add('sync-status');
+		const syncedAt = sync.syncedAt ? new Date(sync.syncedAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : null;
+		status.textContent = sync.error ?? (syncedAt ? `마지막 동기화: ${ syncedAt }` : '아직 동기화하지 않았습니다.');
+		const auto = el('input', { type: 'checkbox' });
+		auto.checked = sync.auto !== false;
+		auto.addEventListener('change', () => {
+			sync.auto = auto.checked;
+			saveSync();
+			autoSync();
+		});
+		const buttons = [['auto', '지금 동기화'], ['push', '올리기'], ['pull', '받기']].map(([mode, text]) => el('button', { class: 'text-btn', 'data-sync': mode, text }));
+		for (const button of buttons) {
+			button.addEventListener('click', async () => {
+				buttons.forEach(item => item.disabled = true);
+				status.textContent = '동기화 중…';
+				try {
+					status.textContent = await runSync(button.dataset.sync);
+				}
+				catch (error) {
+					status.textContent = error.message;
+				}
+				buttons.forEach(item => item.disabled = false);
+			});
+		}
+		const disconnect = el('button', { class: 'text-btn', text: '연결 해제', onclick: () => {
+			sync = null;
+			saveSync();
+			clearTimeout(autoSyncTimer);
+			syncPrompt?.remove();
+			syncPrompt = null;
+			box.replaceWith(syncSection());
+		} });
+		box.append(
+			el('p', { class: 'hint', text: `${ sync.login ?? 'GitHub' } 계정의 비공개 Gist와 설정을 맞춥니다. Gist를 지우지 않는 한 연결을 해제해도 올린 설정은 남습니다.` }),
+			el('label', { class: 'field' }, el('span', { text: '자동 동기화' }), auto),
+			el('div', { class: 'sync-row' }, ...buttons, disconnect),
+			status,
+		);
+		return box;
 	}
 
 	$('settings-btn').append(icon('gear'));
@@ -2694,6 +3082,7 @@
 			el('button', { class: 'menu-option', 'data-action': 'export-settings', text: '설정 내보내기', onclick: exportSettings }),
 			el('button', { class: 'menu-option', 'data-action': 'import-settings', text: '설정 가져오기', onclick: importSettings }),
 			el('p', { class: 'hint', text: '지표, 작도, 관심종목, 알림, 테마, AI 창 설정을 파일로 옮깁니다. AI API 키는 들어가지 않습니다. 가져오면 지금 설정을 덮어쓰고 화면을 다시 불러옵니다.' }),
+			syncSection(),
 			version,
 		];
 		if (desktop) {
@@ -2703,7 +3092,7 @@
 				status.textContent = await desktop.checkForUpdates();
 			} }));
 		}
-		popover.className = 'popover';
+		popover.className = 'popover app-menu';
 		openPopover($('settings-btn'), ...items);
 	});
 
