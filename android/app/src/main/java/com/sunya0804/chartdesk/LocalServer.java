@@ -52,6 +52,8 @@ final class LocalServer {
     private static final String[][] PROXY_ROUTES = {
         { "query1.finance.yahoo.com", "/v8/finance/chart/" },
         { "query2.finance.yahoo.com", "/v1/finance/search" },
+        // 오른쪽 패널의 관련 뉴스(한국어 기사)
+        { "news.google.com", "/rss/search" },
     };
 
     private final AssetManager assets;

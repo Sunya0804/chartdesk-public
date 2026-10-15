@@ -1032,7 +1032,142 @@
 		$('detail-high').textContent = optional(quote?.high, formatPrice);
 		$('detail-low').textContent = optional(quote?.low, formatPrice);
 		$('detail-turnover').textContent = optional(quote?.turnover, formatVolume);
+		renderSide();
 	}
+
+	// ---------- 수익률과 관련 뉴스 (오른쪽 패널) ----------
+	// 종목마다 일봉·월봉·뉴스를 한 번 받아 두고 10분이 지나면 다시 받는다. 마지막 값은 실시간 가격으로 바꿔 계산한다.
+
+	const sideData = new Map();
+	const SIDE_FRESH_MS = 10 * 60 * 1000;
+	let sideNewsShown = null;
+
+	function sideEntry(id) {
+		let entry = sideData.get(id);
+		if (!entry || (!entry.loading && Date.now() - entry.at > SIDE_FRESH_MS)) {
+			entry = { at: Date.now(), loading: true, daily: entry?.daily ?? null, monthly: entry?.monthly ?? null, news: entry?.news ?? null };
+			sideData.set(id, entry);
+			const current = entry;
+			// 뉴스는 한국어 기사(Google 뉴스)를 먼저 찾고, 없으면 Yahoo의 영어 기사로 대신한다.
+			const news = PROV.koreanNews(id, symbolInfo(id).name, symbolInfo(id).base)
+				.catch(() => [])
+				.then(items => (items.length ? items : PROV.news(id, symbolInfo(id).base)));
+			Promise.allSettled([loadBars(id, '1d'), loadBars(id, '1M'), news]).then(([daily, monthly, news]) => {
+				if (daily.status === 'fulfilled') current.daily = daily.value.bars;
+				if (monthly.status === 'fulfilled') current.monthly = monthly.value.bars;
+				if (news.status === 'fulfilled') current.news = news.value;
+				else current.news ??= [];
+				current.loading = false;
+				current.at = Date.now();
+				renderSide();
+			});
+		}
+		return entry;
+	}
+
+	function renderSide() {
+		const id = activePane()?.cfg.symbol;
+		if (!id) return;
+		const entry = sideEntry(id);
+		renderPerformance(id, entry);
+		// 뉴스는 받은 목록이 바뀔 때만 다시 그린다(시세가 올 때마다 그리지 않는다).
+		if (sideNewsShown !== entry.news || !entry.news) {
+			renderNews(entry);
+			sideNewsShown = entry.news;
+		}
+	}
+
+	const signedCell = (label, value, title = '') => el('div', { class: 'perf-cell', title },
+		el('small', { text: label }),
+		el('b', { class: value === null ? '' : value >= 0 ? 'up' : 'down', text: value === null ? '–' : formatPercent(value * 100) }));
+
+	/** 기간별(1주~3년, 연초 이후)과 최근 12개월 수익률. */
+	function renderPerformance(id, entry) {
+		const box = $('perf');
+		const daily = entry.daily;
+		if (!daily?.length) {
+			box.replaceChildren(el('p', { class: 'empty', text: entry.loading ? '불러오는 중…' : '수익률을 계산할 봉을 받지 못했습니다.' }));
+			return;
+		}
+		const last = ticker.prices.get(id)?.price ?? daily[daily.length - 1].close;
+		// 기준은 지금 시각이다(Yahoo 일봉은 하루이틀 늦게 올라오기도 한다).
+		const now = Date.now() / 1000 + TZ_OFFSET;
+		const monthly = entry.monthly ?? [];
+		// days일 전 그날의 종가. 일봉이 모자라면(Upbit은 200일) 1년 이상은 월봉으로 어림한다.
+		const before = (days) => {
+			const index = barIndexAt(daily, now - days * 86400);
+			if (index >= 0 && (index < daily.length - 1 || days <= 7)) return daily[index].close;
+			const months = Math.round(days / 30.4);
+			if (days >= 365 && monthly.length > months) return monthly[monthly.length - 1 - months].close;
+			return null;
+		};
+		const change = reference => (reference ? last / reference - 1 : null);
+		// 연초 이후: 지난해 마지막 일봉 종가 대비.
+		const year = new Date().getFullYear();
+		const yearStart = new Date(year, 0, 1).getTime() / 1000 + TZ_OFFSET;
+		const lastOfYear = barIndexAt(daily, yearStart - 1);
+		const periods = [
+			['1주', change(before(7))],
+			['1개월', change(before(30))],
+			['3개월', change(before(91))],
+			['6개월', change(before(182))],
+			['연초 이후', change(lastOfYear >= 0 ? daily[lastOfYear].close : null)],
+			['1년', change(before(365))],
+			['3년', change(before(1095))],
+		];
+		const rows = [el('div', { class: 'perf-grid' }, ...periods.map(([label, value]) => signedCell(label, value)))];
+		if (monthly.length > 1) {
+			const months = [];
+			for (let i = Math.max(1, monthly.length - 12); i < monthly.length; i++) {
+				const close = i === monthly.length - 1 ? last : monthly[i].close;
+				// 월봉 시각은 거래소 현지 1일 0시라 UTC로는 전날일 수 있다(한국은 전날 15시). 반나절 더해 그 달로 읽는다.
+				const date = new Date((monthly[i].time - TZ_OFFSET + 43200) * 1000);
+				const label = `${ String(date.getUTCFullYear()).slice(2) }.${ String(date.getUTCMonth() + 1).padStart(2, '0') }`;
+				months.push(signedCell(i === monthly.length - 1 ? `${ label } 진행` : label, close / monthly[i - 1].close - 1, '전월 종가 대비'));
+			}
+			rows.push(el('div', { class: 'perf-sub', text: '월별 (전월 종가 대비, 최근 달부터)' }), el('div', { class: 'perf-grid months' }, ...months.reverse()));
+		}
+		box.replaceChildren(...rows);
+	}
+
+	/** 몇 분 전, 몇 시간 전, 며칠 전. */
+	function ago(seconds) {
+		const passed = Math.max(0, Date.now() / 1000 - seconds);
+		if (passed < 3600) return `${ Math.max(1, Math.round(passed / 60)) }분 전`;
+		if (passed < 86400) return `${ Math.round(passed / 3600) }시간 전`;
+		if (passed < 30 * 86400) return `${ Math.round(passed / 86400) }일 전`;
+		return new Date(seconds * 1000).toLocaleDateString('ko-KR');
+	}
+
+	function renderNews(entry) {
+		const list = $('news');
+		if (!entry.news) {
+			list.replaceChildren(el('li', { class: 'empty', text: '불러오는 중…' }));
+			return;
+		}
+		if (entry.news.length === 0) {
+			list.replaceChildren(el('li', { class: 'empty', text: '최근 뉴스를 찾지 못했습니다.' }));
+			return;
+		}
+		// 이 종목과 관련된 기사만 보여 준다. 하나도 없으면 검색 결과를 그대로 보여 주고 그렇다고 알린다.
+		const related = entry.news.filter(item => item.related);
+		const shown = related.length ? related : entry.news;
+		const note = related.length ? [] : [el('li', { class: 'empty', text: '이 종목을 직접 다룬 기사를 찾지 못해 검색 결과를 그대로 보여 줍니다.' })];
+		list.replaceChildren(...note, ...shown.slice(0, 12).map(item => el('li', { class: 'news-row' },
+			item.link
+				? el('a', { href: item.link, target: '_blank', rel: 'noopener', text: item.title })
+				: el('span', { text: item.title }),
+			el('small', { text: `${ item.publisher ? `${ item.publisher } · ` : '' }${ ago(item.time) }` }))));
+	}
+
+	$('news-refresh').append(icon('undo'));
+	$('news-refresh').addEventListener('click', () => {
+		const id = activePane()?.cfg.symbol;
+		if (!id) return;
+		sideData.delete(id);
+		sideNewsShown = null;
+		renderSide();
+	});
 
 	// ---------- 관심종목 ----------
 

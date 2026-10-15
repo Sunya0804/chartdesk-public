@@ -23,6 +23,8 @@ const types = {
 const proxyRoutes = [
   { host: "query1.finance.yahoo.com", path: "/v8/finance/chart/" },
   { host: "query2.finance.yahoo.com", path: "/v1/finance/search" },
+  // 오른쪽 패널의 관련 뉴스(한국어 기사)
+  { host: "news.google.com", path: "/rss/search" },
 ];
 
 const sendJson = (res, status, body) => {

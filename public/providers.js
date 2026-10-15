@@ -827,11 +827,56 @@ window.ChartDeskProviders = (() => {
 			.replace(/\s+USD$/, '')
 			.replace(/,?\s+(Co\.,?\s*Ltd\.?|Inc\.?|Corp\.?|Corporation|Ltd\.?|Limited|PLC|N\.V\.|S\.A\.)$/i, '');
 		if (!body.news?.length && name) body = await search(name);
+		// 검색 결과에는 관련 없는 기사도 섞인다. 기사의 관련 종목에 이 종목이 있거나 제목에 코드·이름이 나오면 related로 표시한다.
+		const coin = provider === yahoo ? '' : query.replace(/-USD$/, '');
+		const words = [code.replace(/\.(KS|KQ|T|HK|SS|SZ)$/, ''), coin, name.split(/\s+/)[0]]
+			.filter(word => word && word.length >= 2 && !/^\d+$/.test(word))
+			.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+		const pattern = words.length ? new RegExp(`\\b(${ words.join('|') })\\b`, 'i') : null;
 		return (body.news ?? [])
 			.filter(item => item.title && Number.isFinite(item.providerPublishTime))
 			.sort((a, b) => b.providerPublishTime - a.providerPublishTime)
-			.map(item => ({ title: item.title, publisher: item.publisher ?? '', time: item.providerPublishTime, link: item.link ?? '' }));
+			.map(item => ({
+				title: item.title,
+				publisher: item.publisher ?? '',
+				time: item.providerPublishTime,
+				link: item.link ?? '',
+				related: (item.relatedTickers ?? []).includes(query) || (pattern !== null && pattern.test(item.title)),
+			}));
 	}
 
-	return { list, byId, resolve, describe, catalog, logos, news, options, curated: CURATED, searchRemote: query => yahoo.search(query) };
+	/**
+	 * 한국어 관련 뉴스. Google 뉴스 RSS에서 최근 7일 기사를 찾는다(개인용 피드 읽기).
+	 * 검색어는 종목의 한국어 이름을 쓴다. 코인은 Upbit에 등록된 한국어 이름(비트코인, 이더리움)을 찾아 쓴다.
+	 */
+	async function koreanNews(id, name, base) {
+		const target = resolve(id);
+		if (!target) return [];
+		const { provider, code } = target;
+		let term = name;
+		if (provider !== yahoo) {
+			const coin = (base ?? coinOf(code, provider.group === 'Upbit' || provider.group === 'Bithumb')).replace(/^1(0{3,})/, '');
+			if (!term || /^[A-Z0-9]+$/.test(term)) {
+				const upbit = (await catalog(byId.get('UPBIT'))).find(item => item.base === coin && item.quote === 'KRW');
+				term = upbit?.name || `${ coin } 코인`;
+			}
+		}
+		term ||= code.replace(/\.(KS|KQ)$/, '');
+		const feed = `https://news.google.com/rss/search?q=${ encodeURIComponent(`${ term } when:7d`) }&hl=ko&gl=KR&ceid=KR:ko`;
+		const response = await fetch(`/api/proxy?url=${ encodeURIComponent(feed) }`);
+		if (!response.ok) throw new Error(`HTTP ${ response.status }`);
+		const doc = new DOMParser().parseFromString(await response.text(), 'text/xml');
+		return [...doc.querySelectorAll('item')]
+			.map((item) => {
+				const publisher = item.querySelector('source')?.textContent ?? '';
+				let title = item.querySelector('title')?.textContent ?? '';
+				// 제목 끝의 " - 언론사"를 뗀다.
+				if (publisher && title.endsWith(` - ${ publisher }`)) title = title.slice(0, -(publisher.length + 3));
+				return { title, publisher, time: Date.parse(item.querySelector('pubDate')?.textContent ?? '') / 1000, link: item.querySelector('link')?.textContent ?? '', related: true, term };
+			})
+			.filter(item => item.title && Number.isFinite(item.time))
+			.sort((a, b) => b.time - a.time);
+	}
+
+	return { list, byId, resolve, describe, catalog, logos, news, koreanNews, options, curated: CURATED, searchRemote: query => yahoo.search(query) };
 })();
