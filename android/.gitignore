@@ -1,0 +1,8 @@
+.gradle/
+build/
+app/build/
+local.properties
+# 서명 키 정보. 절대 올리지 않는다.
+android-signing.properties
+*.jks
+*.keystore

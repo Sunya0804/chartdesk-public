@@ -1,7 +1,7 @@
 {
   "name": "chartdesk",
   "productName": "ChartDesk",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": true,
   "description": "개인용 실시간 차트 워크스페이스",
   "author": "Sunya0804",
@@ -12,7 +12,8 @@
   "scripts": {
     "start": "node server.mjs",
     "app": "electron .",
-    "dist": "electron-builder --win --publish never"
+    "dist": "electron-builder --win --publish never",
+    "dist:android": "node android/dist.mjs"
   },
   "dependencies": {
     "electron-updater": "6.8.9"

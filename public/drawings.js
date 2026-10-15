@@ -1136,7 +1136,9 @@ window.ChartDeskDrawings = (() => {
 			this.onDown = event => this.handleDown(event);
 			this.onMove = event => this.handleMove(event);
 			this.onDoubleClick = event => this.handleDoubleClick(event);
+			this.onTouch = event => this.handleTouch(event);
 			env.body.addEventListener('mousedown', this.onDown, true);
+			env.body.addEventListener('touchstart', this.onTouch, { capture: true, passive: false });
 			env.body.addEventListener('mousemove', this.onMove);
 			env.body.addEventListener('dblclick', this.onDoubleClick, true);
 		}
@@ -1649,17 +1651,52 @@ window.ChartDeskDrawings = (() => {
 			});
 		}
 
-		/** 버튼을 뗄 때까지 창 전체에서 마우스를 따라간다. */
+		/** 버튼(손가락)을 뗄 때까지 창 전체에서 마우스(손가락)를 따라간다. */
 		track(onMove, onEnd) {
 			this.drag = true;
+			const onTouchMove = (event) => {
+				event.preventDefault();
+				if (event.touches.length === 1) onMove(event.touches[0]);
+			};
 			const end = () => {
 				window.removeEventListener('mousemove', onMove, true);
 				window.removeEventListener('mouseup', end, true);
+				window.removeEventListener('touchmove', onTouchMove, true);
+				window.removeEventListener('touchend', end, true);
+				window.removeEventListener('touchcancel', end, true);
 				this.drag = null;
 				onEnd();
 			};
 			window.addEventListener('mousemove', onMove, true);
 			window.addEventListener('mouseup', end, true);
+			window.addEventListener('touchmove', onTouchMove, { capture: true, passive: false });
+			window.addEventListener('touchend', end, true);
+			window.addEventListener('touchcancel', end, true);
+		}
+
+		// 휴대폰(터치): 도구를 골랐거나 작도를 눌렀을 때만 가로채고, 아니면 차트가 평소처럼 움직인다.
+		// 점은 한 번씩 눌러 찍고, 작도를 끌면 옮겨지며, 두 번 누르면 설정 창이 열린다(여러 점 도구는 끝난다).
+		handleTouch(event) {
+			if (event.touches.length !== 1) return;
+			const touch = event.touches[0];
+			const now = performance.now();
+			const twice = now - (this.lastTap ?? 0) < 350;
+			this.lastTap = now;
+			const pointer = {
+				button: 0,
+				target: event.target,
+				clientX: touch.clientX,
+				clientY: touch.clientY,
+				detail: twice ? 2 : 1,
+				shiftKey: false,
+				stopPropagation: () => event.stopPropagation(),
+				preventDefault: () => event.preventDefault(),
+			};
+			if (twice && !this.env.tool()) {
+				this.handleDoubleClick(pointer);
+				if (event.defaultPrevented) return;
+			}
+			this.handleDown(pointer);
 		}
 
 		handleMove(event) {
@@ -1698,6 +1735,7 @@ window.ChartDeskDrawings = (() => {
 
 		destroy() {
 			this.env.body.removeEventListener('mousedown', this.onDown, true);
+			this.env.body.removeEventListener('touchstart', this.onTouch, true);
 			this.env.body.removeEventListener('mousemove', this.onMove);
 			this.env.body.removeEventListener('dblclick', this.onDoubleClick, true);
 		}

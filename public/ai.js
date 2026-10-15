@@ -21,6 +21,8 @@
 				login: '터미널 창에서 "Sign in with Google"을 고르고 브라우저에서 로그인한 뒤, 터미널에 /quit를 입력하고 "다시 확인"을 누르세요.',
 				note: '설치: 터미널에서 npm install -g @google/gemini-cli' } },
 	];
+	// 휴대폰에는 계정용 CLI를 깔 수 없어서 안드로이드 앱에서는 API 키로만 연결한다.
+	if (window.chartdeskApp?.platform === 'android') for (const provider of PROVIDERS) delete provider.account;
 	const byId = new Map(PROVIDERS.map(provider => [provider.id, provider]));
 
 	// ---------- 저장과 상태 ----------
@@ -604,7 +606,10 @@
 	}
 
 	function keysView() {
-		const rows = [el('p', { class: 'hint', text: '세 서비스 모두 이 컴퓨터의 공식 CLI(Claude Code, Codex, Gemini CLI)에 로그인한 본인 계정으로 쓰거나, API 키로 연결할 수 있습니다. 계정으로 쓰면 API 요금 없이 구독(또는 무료) 한도에서 빠집니다. 키는 이 컴퓨터의 ChartDesk 폴더(ai-keys.json)에만 저장되고, 해당 회사의 API 주소로만 보냅니다. 키 없이 쓰는 또 다른 방법은 아래의 "브리핑을 웹에서"입니다. 프롬프트를 복사해 드리고, 본인 계정으로 로그인한 웹 창에 붙여 넣어 보내는 방식입니다.' })];
+		const intro = window.chartdeskApp?.platform === 'android'
+			? '휴대폰 앱에서는 API 키로 연결합니다(구독 계정 연결은 PC 앱에서만 됩니다). 키는 이 휴대폰의 ChartDesk 앱 저장소에만 저장되고, 해당 회사의 API 주소로만 보냅니다. 키 없이 쓰려면 아래의 "브리핑을 웹에서"로 프롬프트를 복사해, 본인 계정으로 로그인한 웹에 붙여 넣으세요.'
+			: '세 서비스 모두 이 컴퓨터의 공식 CLI(Claude Code, Codex, Gemini CLI)에 로그인한 본인 계정으로 쓰거나, API 키로 연결할 수 있습니다. 계정으로 쓰면 API 요금 없이 구독(또는 무료) 한도에서 빠집니다. 키는 이 컴퓨터의 ChartDesk 폴더(ai-keys.json)에만 저장되고, 해당 회사의 API 주소로만 보냅니다. 키 없이 쓰는 또 다른 방법은 아래의 "브리핑을 웹에서"입니다. 프롬프트를 복사해 드리고, 본인 계정으로 로그인한 웹 창에 붙여 넣어 보내는 방식입니다.';
+		const rows = [el('p', { class: 'hint', text: intro })];
 		for (const provider of PROVIDERS) {
 			const account = provider.account && status[provider.id]?.account;
 			const using = via(provider.id);

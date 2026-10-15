@@ -688,6 +688,30 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 	.clock { display: none; }
 }
 
+/* 휴대폰: 작도 도구는 차트 위 가로 줄로, 차트는 화면 폭 전체로 */
+@media (max-width: 600px) {
+	.topbar { gap: 4px; padding: 4px 8px; }
+	.brand { margin-right: 2px; font-size: 0; gap: 0; }
+	.search-btn { width: auto; flex: 1; min-width: 110px; margin-left: 0; }
+	.search-btn kbd, .topbar .divider { display: none; }
+	.tools {
+		flex-direction: row;
+		width: 100%;
+		padding: 2px 6px;
+		border-right: 0;
+		border-bottom: 1px solid var(--border);
+		overflow-x: auto;
+		overflow-y: hidden;
+	}
+	.tools::-webkit-scrollbar { display: none; }
+	.tools .sep { width: 1px; height: 22px; margin: 0 4px; }
+	.grid { flex-basis: 100%; min-height: 0; height: 64vh; padding: 4px 0; }
+	.grid.layout-2, .grid.layout-4 { height: auto; grid-auto-rows: 56vh; }
+	.side { padding: 0 0 4px; }
+	/* AI 창은 화면 전체를 덮는다. 닫기(×)로 차트로 돌아간다. 아래쪽의 .ai-panel 규칙보다 앞서도록 .workspace를 붙인다. */
+	.workspace .ai-panel { position: fixed; inset: 0; z-index: 50; height: auto; border-left: 0; }
+}
+
 /* 종목 로고 */
 .logo {
 	display: inline-flex;
