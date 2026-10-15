@@ -315,6 +315,7 @@
 			drawingDefaults: {},
 			toolPicks: {},
 			symbolMeta: {},
+			paneSizes: {},
 		};
 	}
 
@@ -356,6 +357,9 @@
 				drawingDefaults: saved.drawingDefaults && typeof saved.drawingDefaults === 'object' ? saved.drawingDefaults : {},
 				toolPicks: saved.toolPicks && typeof saved.toolPicks === 'object' ? saved.toolPicks : {},
 				symbolMeta: saved.symbolMeta && typeof saved.symbolMeta === 'object' ? saved.symbolMeta : {},
+				// 가격 패널(main)과 하단 지표 패널(지표 id)의 높이 비율. 모든 종목·차트가 함께 쓴다.
+				paneSizes: Object.fromEntries(Object.entries(saved.paneSizes && typeof saved.paneSizes === 'object' ? saved.paneSizes : {})
+					.filter(([, size]) => Number.isFinite(size) && size > 0)),
 			};
 		}
 		catch {
@@ -1840,6 +1844,8 @@
 			});
 			this.chartHost.addEventListener('wheel', event => this.handleAxisWheel(event), { capture: true, passive: false });
 			this.resizeObserver = new ResizeObserver(() => this.positionLegends());
+			// 패널 사이 경계를 끌면 이름표가 따라가고, 놓으면 높이를 저장한다.
+			this.chartHost.addEventListener('pointerdown', () => this.followPaneDrag(), true);
 			this.resizeObserver.observe(this.body);
 
 			this.applyTheme();
@@ -2193,6 +2199,7 @@
 
 		removeIndicator(id) {
 			state.indicators = state.indicators.filter(item => item.id !== id);
+			delete state.paneSizes[id];
 			indicatorsChanged();
 		}
 
@@ -2270,7 +2277,7 @@
 				this.inds.push(ind);
 			}
 			this.applyScale();
-			this.chart.panes().forEach((pane, i) => pane.setStretchFactor(i === 0 ? 3 : 1));
+			this.applyPaneSizes();
 			this.restyleIndicators();
 			this.setIndicatorData();
 			this.updateLegend();
@@ -2319,6 +2326,51 @@
 			}
 			ind.row = el('div', { class: `legend-row ind-row${ def.overlay ? '' : ' floating' }` }, ...nodes);
 			(def.overlay ? this.legend : this.body).append(ind.row);
+		}
+
+		/** 저장된 높이 비율로 패널 높이를 맞춘다. 저장된 값이 없으면 가격 3 : 지표 1. */
+		applyPaneSizes() {
+			const chartPanes = this.chart.panes();
+			chartPanes.forEach((pane, i) => {
+				const ind = this.inds.find(candidate => candidate.pane === i);
+				pane.setStretchFactor(i === 0 ? state.paneSizes.main ?? 3 : state.paneSizes[ind?.cfg.id] ?? 1);
+			});
+			this.appliedSizes = chartPanes.map(pane => pane.getStretchFactor());
+			requestAnimationFrame(() => this.positionLegends());
+		}
+
+		/** 누르고 있는 동안 이름표를 패널 위쪽에 맞춰 옮기고, 놓았을 때 높이가 바뀌었으면 저장한다. */
+		followPaneDrag() {
+			if (this.inds.every(ind => ind.pane === 0)) return;
+			let frame = 0;
+			const follow = () => {
+				this.positionLegends();
+				frame = requestAnimationFrame(follow);
+			};
+			frame = requestAnimationFrame(follow);
+			const done = () => {
+				cancelAnimationFrame(frame);
+				window.removeEventListener('pointerup', done, true);
+				window.removeEventListener('pointercancel', done, true);
+				this.positionLegends();
+				this.savePaneSizes();
+			};
+			window.addEventListener('pointerup', done, true);
+			window.addEventListener('pointercancel', done, true);
+		}
+
+		savePaneSizes() {
+			if (this.dead) return;
+			const sizes = this.chart.panes().map(pane => pane.getStretchFactor());
+			if (this.appliedSizes && sizes.length === this.appliedSizes.length && sizes.every((size, i) => Math.abs(size - this.appliedSizes[i]) < 1e-6)) return;
+			state.paneSizes.main = sizes[0];
+			for (const ind of this.inds) {
+				if (ind.pane > 0) state.paneSizes[ind.cfg.id] = sizes[ind.pane];
+			}
+			this.appliedSizes = sizes;
+			save();
+			// 배치가 여러 개면 다른 차트도 같은 높이로 맞춘다.
+			panes.forEach(pane => pane !== this && pane.applyPaneSizes());
 		}
 
 		/** 보조 패널 지표의 이름표를 각 패널의 왼쪽 위에 맞춘다. */
