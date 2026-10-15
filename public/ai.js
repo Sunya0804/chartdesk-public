@@ -989,5 +989,21 @@
 		if (!panel.hidden) renderAll();
 	});
 
+	// 다른 창(백테스트)이 AI 창에서 고른 서비스와 모델로 한 번 묻고 답을 받는 창구.
+	window.ChartDeskAI = {
+		label: () => `${ byId.get(settings.provider).label } · ${ currentModel() || '모델 없음' }`,
+		async ask(system, prompt, signal) {
+			if (!connected(settings.provider)) await refreshStatus();
+			if (!connected(settings.provider)) throw new Error('AI 분석 창에서 Claude, GPT, Gemini 중 하나를 먼저 연결하세요.');
+			const model = currentModel();
+			if (!model) throw new Error('AI 분석 창에서 모델을 고르세요.');
+			let text = '';
+			await stream(settings.provider, model, system, [{ role: 'user', content: prompt }], (part) => {
+				text += part;
+			}, signal);
+			return text;
+		},
+	};
+
 	refreshStatus().then(() => setOpen(settings.open));
 })();

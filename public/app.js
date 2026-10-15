@@ -5,15 +5,27 @@
 	const IND = window.ChartDeskIndicators;
 	const DRAW = window.ChartDeskDrawings;
 	const PROV = window.ChartDeskProviders;
+	const RULES = window.ChartDeskRules;
 	const STORAGE_KEY = 'chartdesk.workspace.v1';
-	const INTERVALS = [['1m', '1분'], ['5m', '5분'], ['15m', '15분'], ['30m', '30분'], ['1h', '1시간'], ['4h', '4시간'], ['1d', '일'], ['1w', '주']];
+	const INTERVALS = [
+		['1m', '1분'], ['3m', '3분'], ['5m', '5분'], ['15m', '15분'], ['30m', '30분'],
+		['1h', '1시간'], ['2h', '2시간'], ['4h', '4시간'], ['6h', '6시간'], ['12h', '12시간'],
+		['1d', '일'], ['1w', '주'], ['1M', '월'],
+	];
+	// 차트 머리에 늘 보이는 주기. 나머지는 ▾ 메뉴에서 고른다.
+	const MAIN_INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'];
+	const intervalLabel = id => INTERVALS.find(([key]) => key === id)?.[1] ?? id;
 	// 기간 버튼: 이름, 주기, 보여 줄 봉 수(0은 전체).
 	const RANGES = [['1일', '5m', 288], ['5일', '30m', 240], ['1개월', '1h', 720], ['3개월', '4h', 540], ['1년', '1d', 365], ['전체', '1w', 0]];
 	const CHART_TYPES = [['candles', '캔들'], ['heikin', '하이킨 아시'], ['bars', '바'], ['line', '라인'], ['area', '영역']];
 	const INDICATOR_CATEGORIES = ['추세', '모멘텀', '변동성', '거래량'];
 	// 선 하나짜리 지표를 여러 개 올려도 구분되도록 돌려 쓰는 색.
 	const PALETTE = ['#f5a623', '#a855f7', '#22c55e', '#ec4899', '#06b6d4', '#eab308', '#f97316'];
-	const INTERVAL_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800 };
+	// 월봉은 길이가 달마다 달라 30일로 어림한다(봉 경계는 countdown에서 따로 계산).
+	const INTERVAL_SECONDS = {
+		'1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '2h': 7200, '4h': 14400, '6h': 21600, '12h': 43200,
+		'1d': 86400, '1w': 604800, '1M': 2592000,
+	};
 	const LAYOUTS = [1, 2, 4];
 	// [id, 이름, 미리 보기 색(바탕, 패널, 강조, 상승, 하락)]
 	const THEMES = [
@@ -184,8 +196,12 @@
 		if (saved.hidden === true) item.hidden = true;
 		if (typeof saved.axisLabel === 'boolean') item.axisLabel = saved.axisLabel;
 		if (Array.isArray(saved.levels)) item.levels = saved.levels.filter(Number.isFinite);
+		if (typeof saved.tf === 'string' && INTERVAL_SECONDS[saved.tf] && frameable(def)) item.tf = saved.tf;
 		return item;
 	}
+
+	/** 다른 주기의 봉으로 계산해 얹을 수 있는 지표. 화면에 직접 그리는 지표와 선을 옆으로 미는 지표는 뺀다. */
+	const frameable = def => !def.draw && !def.basis && !def.plots.some(plot => typeof plot.shift === 'function');
 
 	function defaultPane(symbol = 'BINANCE:BTCUSDT') {
 		return {
@@ -193,6 +209,7 @@
 			interval: '1h',
 			chartType: 'candles',
 			log: false,
+			compare: [],
 		};
 	}
 
@@ -228,7 +245,37 @@
 			interval: INTERVALS.some(([id]) => id === pane.interval) ? pane.interval : base.interval,
 			chartType: CHART_TYPES.some(([id]) => id === pane.chartType) ? pane.chartType : 'candles',
 			log: pane.log === true,
+			compare: (Array.isArray(pane.compare) ? pane.compare : [])
+				.filter(item => item && typeof item.symbol === 'string' && PROV.resolve(normalizeId(item.symbol)))
+				.slice(0, 5)
+				.map((item, i) => ({ symbol: normalizeId(item.symbol), color: typeof item.color === 'string' ? item.color : PALETTE[(i + 1) % PALETTE.length] })),
 		};
+	}
+
+	/**
+	 * 알림 세 가지: 가격(price), 지표 조건(cond: 봉이 마감될 때 확인), 작도 돌파(drawing: 수평선·추세선을 가격이 넘을 때).
+	 * 예전 알림은 kind가 없고 가격 알림이다.
+	 */
+	function sanitizeAlert(alert) {
+		if (!alert || typeof alert.symbol !== 'string') return null;
+		const base = {
+			id: typeof alert.id === 'string' ? alert.id : uid(),
+			symbol: normalizeId(alert.symbol),
+			active: alert.active !== false,
+			triggeredAt: Number.isFinite(alert.triggeredAt) ? alert.triggeredAt : null,
+			createdAt: Number.isFinite(alert.createdAt) ? alert.createdAt : 0,
+		};
+		if (alert.kind === 'cond') {
+			const cond = RULES.cleanCond(alert.cond);
+			if (!cond || !INTERVAL_SECONDS[alert.interval]) return null;
+			return { ...base, kind: 'cond', interval: alert.interval, cond, repeat: alert.repeat === true, checked: Number.isFinite(alert.checked) ? alert.checked : null };
+		}
+		if (alert.kind === 'drawing') {
+			if (typeof alert.drawingId !== 'string') return null;
+			return { ...base, kind: 'drawing', drawingId: alert.drawingId, op: ['crossUp', 'crossDown', 'cross'].includes(alert.op) ? alert.op : 'cross' };
+		}
+		if (!Number.isFinite(alert.price)) return null;
+		return { ...base, kind: 'price', price: alert.price, direction: alert.direction === 'below' ? 'below' : 'above' };
 	}
 
 	function sanitizeDrawings(saved) {
@@ -304,11 +351,7 @@
 				watchlist: Array.isArray(saved.watchlist)
 					? saved.watchlist.filter(s => typeof s === 'string').map(normalizeId).filter(id => PROV.resolve(id))
 					: base.watchlist,
-				alerts: Array.isArray(saved.alerts)
-					? saved.alerts
-						.filter(a => a && typeof a.symbol === 'string' && Number.isFinite(a.price))
-						.map(a => ({ ...a, symbol: normalizeId(a.symbol) }))
-					: [],
+				alerts: Array.isArray(saved.alerts) ? saved.alerts.map(sanitizeAlert).filter(Boolean) : [],
 				drawings: sanitizeDrawings(saved.drawings),
 				drawingDefaults: saved.drawingDefaults && typeof saved.drawingDefaults === 'object' ? saved.drawingDefaults : {},
 				toolPicks: saved.toolPicks && typeof saved.toolPicks === 'object' ? saved.toolPicks : {},
@@ -415,12 +458,13 @@
 		const key = `${ symbol }|${ interval }`;
 		let entry = basisBars.get(key);
 		if (!entry || (!entry.loading && Date.now() - entry.at > BASIS_FRESH_MS)) {
-			entry = { at: Date.now(), loading: true, source: entry?.source ?? null, waiting: new Set() };
+			entry = { at: Date.now(), loading: true, source: entry?.source ?? null, bars: entry?.bars ?? null, waiting: new Set() };
 			const current = entry;
 			basisBars.set(key, current);
 			loadBars(symbol, interval)
 				.then(({ bars }) => {
 					current.source = IND.source(bars);
+					current.bars = bars;
 				})
 				.catch(() => {})
 				.finally(() => {
@@ -432,7 +476,44 @@
 				});
 		}
 		if (entry.loading) entry.waiting.add(onReady);
-		return { interval, source: entry.source, loading: entry.loading && !entry.source };
+		return { interval, source: entry.source, bars: entry.bars, loading: entry.loading && !entry.source };
+	}
+
+	/**
+	 * 위 주기의 봉에 차트의 최근 봉을 이어 붙인다. 위 주기 봉은 5분마다 다시 받으므로, 그 사이의 실시간 움직임은
+	 * 차트 봉으로 마지막 봉을 고치고 새 봉을 만든다.
+	 */
+	function mergeFrame(frameBars, chartBars, interval) {
+		const seconds = INTERVAL_SECONDS[interval];
+		const out = frameBars.slice();
+		let last = out[out.length - 1];
+		if (!last) return out;
+		const startIndex = barIndexAt(chartBars, last.time);
+		for (let i = Math.max(0, startIndex); i < chartBars.length; i++) {
+			const bar = chartBars[i];
+			if (bar.time < last.time) continue;
+			if (bar.time >= last.time + seconds) {
+				const time = last.time + Math.floor((bar.time - last.time) / seconds) * seconds;
+				last = { time, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume };
+				out.push(last);
+				continue;
+			}
+			if (last === frameBars[frameBars.length - 1]) {
+				last = { ...last };
+				out[out.length - 1] = last;
+			}
+			last.high = Math.max(last.high, bar.high);
+			last.low = Math.min(last.low, bar.low);
+			last.close = bar.close;
+		}
+		return out;
+	}
+
+	/** 공급원에서 최근 봉 몇 개를 받는다(비교 종목 갱신). */
+	async function loadTail(id, interval) {
+		const { provider, code } = PROV.resolve(id);
+		const bars = provider.tail ? await provider.tail(code, interval) : (await provider.klines(code, interval, undefined, 3)).bars;
+		return bars.map(bar => ({ ...bar, time: bar.time + TZ_OFFSET }));
 	}
 
 	/** 봉을 받아 차트 시간(현지 시각 기준)으로 바꾼다. */
@@ -960,13 +1041,55 @@
 	function addAlert(symbol, price, lastPrice) {
 		state.alerts.push({
 			id: uid(),
+			kind: 'price',
 			symbol,
 			price,
 			direction: price >= lastPrice ? 'above' : 'below',
 			active: true,
 			triggeredAt: null,
+			createdAt: Date.now(),
 		});
 		alertsChanged();
+	}
+
+	function addCondAlert(symbol, interval, cond, repeat) {
+		state.alerts.push({ id: uid(), kind: 'cond', symbol, interval, cond, repeat, active: true, triggeredAt: null, createdAt: Date.now(), checked: null });
+		alertsChanged();
+		checkCondAlerts();
+	}
+
+	function addDrawingAlert(symbol, drawingId, op) {
+		state.alerts.push({ id: uid(), kind: 'drawing', symbol, drawingId, op, active: true, triggeredAt: null, createdAt: Date.now() });
+		alertsChanged();
+	}
+
+	// 가격이 닿는지 볼 수 있는 작도: 수평선, 수평 레이, 추세선 종류.
+	const ALERTABLE_DRAWINGS = new Set(['hline', 'hray', 'line']);
+	const findDrawing = (symbol, id) => drawingsFor(symbol).find(drawing => drawing.id === id);
+
+	/** 작도의 그 시각(차트 시간) 가격. 선이 그 시각에 닿지 않으면 null. */
+	function drawingLevel(drawing, time) {
+		const [a, b] = drawing.points;
+		if (drawing.type === 'hline') return a.p;
+		if (drawing.type === 'hray') return drawing.style.direction === 'left' ? (time <= a.t ? a.p : null) : (time >= a.t ? a.p : null);
+		if (drawing.type !== 'line' || !b || a.t === b.t) return null;
+		const [left, right] = a.t < b.t ? [a, b] : [b, a];
+		const extend = drawing.style.extend ?? 'none';
+		if (time < left.t && extend !== 'both' && extend !== 'left') return null;
+		if (time > right.t && extend === 'none') return null;
+		return left.p + (right.p - left.p) * (time - left.t) / (right.t - left.t);
+	}
+
+	function drawingAlertText(alert) {
+		const drawing = findDrawing(alert.symbol, alert.drawingId);
+		const name = drawing ? DRAW.byId.get(drawing.tool).name : '지워진 작도';
+		return `${ name } ${ { cross: '돌파', crossUp: '상향 돌파', crossDown: '하향 돌파' }[alert.op] }`;
+	}
+
+	function alertText(alert) {
+		if (alert.kind === 'cond') return `${ intervalLabel(alert.interval) }봉 · ${ RULES.describe(alert.cond) }`;
+		if (alert.kind === 'drawing') return drawingAlertText(alert);
+		return `${ formatPrice(alert.price) } ${ alert.direction === 'above' ? '이상' : '이하' }`;
 	}
 
 	function alertsChanged() {
@@ -976,22 +1099,96 @@
 		panes.forEach(pane => pane.syncPriceLines());
 	}
 
+	// 작도 돌파는 직전 시세와 지금 시세 사이에 선이 있는지로 본다.
+	const previousPrices = new Map();
+
 	function checkAlerts(symbol, price) {
 		let fired = false;
+		const previous = previousPrices.get(symbol);
+		previousPrices.set(symbol, price);
+		const now = Date.now() / 1000 + TZ_OFFSET;
 		for (const alert of state.alerts) {
 			if (!alert.active || alert.symbol !== symbol) continue;
-			if (alert.direction === 'above' ? price >= alert.price : price <= alert.price) {
-				alert.active = false;
-				alert.triggeredAt = Date.now();
+			if (alert.kind === 'price' && (alert.direction === 'above' ? price >= alert.price : price <= alert.price)) {
+				fire(alert, `${ formatPrice(alert.price) } ${ alert.direction === 'above' ? '이상' : '이하' } 도달 (현재 ${ formatPrice(price) })`);
 				fired = true;
-				announceAlert(alert, price);
+			}
+			if (alert.kind === 'drawing' && previous !== undefined) {
+				const drawing = findDrawing(symbol, alert.drawingId);
+				const level = drawing ? drawingLevel(drawing, now) : null;
+				if (level === null) continue;
+				const up = previous < level && price >= level;
+				const down = previous > level && price <= level;
+				if ((alert.op !== 'crossDown' && up) || (alert.op !== 'crossUp' && down)) {
+					fire(alert, `${ drawingAlertText(alert) } · ${ up ? '위로' : '아래로' } ${ formatPrice(level) } (현재 ${ formatPrice(price) })`);
+					fired = true;
+				}
 			}
 		}
 		if (fired) alertsChanged();
 	}
 
-	function announceAlert(alert, price) {
-		const message = `${ symbolTitle(alert.symbol) } ${ formatPrice(alert.price) } ${ alert.direction === 'above' ? '이상' : '이하' } 도달 (현재 ${ formatPrice(price) })`;
+	function fire(alert, detail) {
+		alert.triggeredAt = Date.now();
+		if (!alert.repeat) alert.active = false;
+		announceAlert(`${ symbolTitle(alert.symbol) } ${ detail }`);
+	}
+
+	// 지표 조건 알림: 봉이 마감된 뒤 그 주기의 봉을 받아 조건을 계산한다. 다음 봉이 마감될 때까지는 다시 받지 않는다.
+	const nextCondCheck = new Map();
+	let checkingConds = false;
+
+	async function checkCondAlerts() {
+		if (checkingConds) return;
+		checkingConds = true;
+		let changed = false;
+		try {
+			const groups = new Map();
+			for (const alert of state.alerts) {
+				if (!alert.active || alert.kind !== 'cond') continue;
+				const key = `${ alert.symbol }|${ alert.interval }`;
+				if (!groups.has(key)) groups.set(key, []);
+				groups.get(key).push(alert);
+			}
+			for (const [key, alerts] of groups) {
+				const now = Date.now() / 1000 + TZ_OFFSET;
+				if ((nextCondCheck.get(key) ?? 0) > now) continue;
+				const { symbol, interval } = alerts[0];
+				const seconds = INTERVAL_SECONDS[interval];
+				let bars;
+				try {
+					bars = (await loadBars(symbol, interval)).bars;
+				}
+				catch {
+					nextCondCheck.set(key, now + 60);
+					continue;
+				}
+				if (bars.length < 3) continue;
+				const last = bars[bars.length - 1];
+				// 아직 진행 중인 봉은 빼고, 마감된 봉으로만 판단한다.
+				const closed = last.time + seconds > now ? bars.slice(0, -1) : bars;
+				nextCondCheck.set(key, (last.time + seconds > now ? last.time + seconds : now + seconds) + 3);
+				const run = RULES.evaluator(closed, { tzOffset: TZ_OFFSET, symbol, interval, info: symbolInfo(symbol) });
+				const index = closed.length - 1;
+				const barTime = closed[index].time;
+				for (const alert of alerts) {
+					if (alert.checked === barTime) continue;
+					alert.checked = barTime;
+					changed = true;
+					// 알림을 만들기 전에 마감된 봉에서는 울리지 않는다.
+					const closedAt = (barTime + seconds - TZ_OFFSET) * 1000;
+					if (closedAt <= alert.createdAt) continue;
+					if (run.truth(alert.cond)[index]) fire(alert, `${ intervalLabel(interval) }봉 · ${ RULES.describe(alert.cond) } (종가 ${ formatPrice(closed[index].close) })`);
+				}
+			}
+		}
+		finally {
+			checkingConds = false;
+		}
+		if (changed) alertsChanged();
+	}
+
+	function announceAlert(message) {
 		toast(`🔔 ${ message }`);
 		if ('Notification' in window && Notification.permission === 'granted') {
 			new Notification('ChartDesk 알림', { body: message });
@@ -1016,13 +1213,14 @@
 	function renderAlerts() {
 		const list = $('alerts');
 		if (state.alerts.length === 0) {
-			list.replaceChildren(el('li', { class: 'empty', text: '차트 상단의 알림 버튼으로 가격 알림을 만드세요.' }));
+			list.replaceChildren(el('li', { class: 'empty', text: '차트 상단의 알림 버튼으로 가격, 지표 조건, 작도 돌파 알림을 만드세요.' }));
 			return;
 		}
 		const ordered = [...state.alerts].sort((a, b) => Number(b.active) - Number(a.active));
 		list.replaceChildren(...ordered.map((alert) => {
+			const waiting = alert.kind === 'price' ? (alert.direction === 'above' ? '이상 대기' : '이하 대기') : '대기';
 			const status = alert.active
-				? (alert.direction === 'above' ? '이상 대기' : '이하 대기')
+				? `${ waiting }${ alert.repeat && alert.triggeredAt ? ` · 최근 ${ new Date(alert.triggeredAt).toLocaleTimeString('ko-KR') }` : '' }`
 				: `도달 ${ new Date(alert.triggeredAt).toLocaleTimeString('ko-KR') }`;
 			const remove = el('button', {
 				class: 'x',
@@ -1035,31 +1233,103 @@
 			});
 			return el('li', { class: `row${ alert.active ? '' : ' done' }` },
 				el('span', { class: 'sym', text: symbolTitle(alert.symbol) }),
-				el('span', { text: formatPrice(alert.price) }),
+				el('span', { class: 'alert-what', text: alertText(alert), title: alertText(alert) }),
 				el('span', { class: 'sub', text: status }),
 				remove);
 		}));
 	}
 
-	function openAlertEditor(anchor, pane) {
+	/** 알림 만들기: 가격, 지표 조건, 작도 돌파. tab과 drawingId로 처음 열 쪽을 정한다. */
+	function openAlertEditor(anchor, pane, tab = 'price', drawingId = null) {
 		const last = pane.lastPrice();
 		if (last === undefined) return;
-		const input = el('input', { type: 'number', step: 'any', min: '0', value: String(last) });
-		const submit = () => {
-			const price = Number(input.value);
-			if (!Number.isFinite(price) || price <= 0) return;
-			closePopover();
-			addAlert(pane.cfg.symbol, price, last);
+		const symbol = pane.cfg.symbol;
+		const tabs = [['price', '가격'], ['cond', '지표 조건'], ['drawing', '작도 돌파']];
+		const nav = el('div', { class: 'seg alert-tabs' });
+		const body = el('div', { class: 'alert-body' });
+		const note = el('p', { class: 'hint', text: '앱(브라우저 탭)이 켜져 있는 동안 확인합니다.' });
+
+		const priceView = () => {
+			const input = el('input', { type: 'number', step: 'any', min: '0', value: String(last) });
+			const submit = () => {
+				const price = Number(input.value);
+				if (!Number.isFinite(price) || price <= 0) return;
+				closePopover();
+				addAlert(symbol, price, last);
+			};
+			input.addEventListener('keydown', (event) => {
+				if (event.key === 'Enter') submit();
+			});
+			body.replaceChildren(input,
+				el('p', { class: 'hint', text: `${ symbolTitle(symbol) } 가격이 이 값에 닿으면 알립니다.` }),
+				el('div', { class: 'actions' }, el('button', { class: 'primary', text: '알림 추가', onclick: submit })));
+			input.focus();
+			input.select();
 		};
-		input.addEventListener('keydown', (event) => {
-			if (event.key === 'Enter') submit();
-		});
-		openPopover(anchor,
-			input,
-			el('p', { class: 'hint', text: `${ symbolTitle(pane.cfg.symbol) } 가격이 이 값에 닿으면 알립니다.` }),
-			el('div', { class: 'actions' }, el('button', { class: 'primary', text: '알림 추가', onclick: submit })));
-		input.focus();
-		input.select();
+
+		const condView = () => {
+			const LAB = window.ChartDeskLab;
+			// 차트에 올린 지표가 있으면 그 지표로 시작한다.
+			const onChart = state.indicators.map(item => IND.byId.get(item.type)).find(def => RULES.usable(def) && def.id !== 'volume');
+			const start = onChart
+				? { kind: 'compare', left: { kind: 'ind', type: onChart.id, params: state.indicators.find(item => item.type === onChart.id).params }, op: 'crossUp', right: { kind: 'value', value: onChart.id === 'rsi' ? 30 : 0 } }
+				: { kind: 'compare', left: { kind: 'ind', type: 'rsi' }, op: 'crossUp', right: { kind: 'value', value: 30 } };
+			if (onChart && onChart.overlay && onChart.fmt !== 'osc') start.right = { kind: 'price', field: 'close' };
+			const editor = LAB.condEditor(RULES.cleanCond(start));
+			const repeat = checkInput(false, () => {});
+			body.replaceChildren(
+				editor.node,
+				field(`${ intervalLabel(pane.cfg.interval) }봉 마감 때마다 반복`, repeat),
+				el('p', { class: 'hint', text: `${ symbolTitle(symbol) } ${ intervalLabel(pane.cfg.interval) }봉이 마감될 때 조건을 확인합니다. 반복을 끄면 한 번 울리고 꺼집니다.` }),
+				el('div', { class: 'actions' }, el('button', {
+					class: 'primary',
+					text: '알림 추가',
+					onclick: () => {
+						const cond = RULES.cleanCond(editor.value());
+						if (!cond) return;
+						closePopover();
+						addCondAlert(symbol, pane.cfg.interval, cond, repeat.checked);
+						toast(`알림을 만들었습니다: ${ RULES.describe(cond) }`);
+					},
+				})));
+		};
+
+		const drawingView = () => {
+			const lines = drawingsFor(symbol).filter(drawing => ALERTABLE_DRAWINGS.has(drawing.type));
+			if (lines.length === 0) {
+				body.replaceChildren(el('p', { class: 'hint', text: '수평선, 수평 레이, 추세선(레이·연장선 포함)을 먼저 그리세요. 가격이 그 선을 넘으면 알립니다.' }));
+				return;
+			}
+			const now = Date.now() / 1000 + TZ_OFFSET;
+			const options = lines.map((drawing, i) => {
+				const level = drawingLevel(drawing, now);
+				return [drawing.id, `${ i + 1 }. ${ DRAW.byId.get(drawing.tool).name }${ level === null ? ' (지금 시각에 닿지 않음)' : ` · 지금 ${ formatPrice(level, pane.precision) }` }`];
+			});
+			const picked = lines.some(drawing => drawing.id === drawingId) ? drawingId : pane.layer.selectedId && lines.some(drawing => drawing.id === pane.layer.selectedId) ? pane.layer.selectedId : lines[lines.length - 1].id;
+			const which = selectInput(picked, options, () => {});
+			const op = selectInput('cross', [['cross', '돌파 (위·아래 모두)'], ['crossUp', '상향 돌파'], ['crossDown', '하향 돌파']], () => {});
+			body.replaceChildren(
+				field('선', which),
+				field('조건', op),
+				el('p', { class: 'hint', text: '추세선은 지금 시각의 선 위치를 따라갑니다. 선을 옮기면 알림도 옮긴 위치로 확인합니다.' }),
+				el('div', { class: 'actions' }, el('button', {
+					class: 'primary',
+					text: '알림 추가',
+					onclick: () => {
+						closePopover();
+						addDrawingAlert(symbol, which.value, op.value);
+					},
+				})));
+		};
+
+		const show = (id) => {
+			tab = id;
+			nav.replaceChildren(...tabs.map(([key, label]) => el('button', { class: key === id ? 'on' : '', text: label, onclick: () => show(key) })));
+			({ price: priceView, cond: condView, drawing: drawingView })[id]();
+		};
+		popover.className = 'popover alert-editor';
+		openPopover(anchor, el('p', { class: 'title', text: `${ symbolTitle(symbol) } 알림` }), nav, body, note);
+		show(tab);
 	}
 
 	// ---------- 지표 검색과 설정 ----------
@@ -1208,6 +1478,16 @@
 			})));
 		}
 
+		if (frameable(def)) {
+			rows.push(el('div', { class: 'category', text: '기준 주기' }),
+				field('계산할 봉', selectInput(item.tf ?? '', [['', '차트와 같은 주기'], ...INTERVALS], (value) => {
+					if (value) item.tf = value;
+					else delete item.tf;
+					indicatorsChanged();
+				})),
+				el('p', { class: 'hint', text: '차트보다 긴 주기를 고르면 그 주기의 봉으로 계산해 얹습니다(예: 1시간 차트에 4시간 RSI). 차트 주기가 같거나 더 길면 차트 봉으로 계산합니다.' }));
+		}
+
 		const styled = def.plots.filter(plot => plot.type !== 'hist');
 		if (styled.length) rows.push(el('div', { class: 'category', text: '스타일' }));
 		for (const plot of styled) {
@@ -1250,6 +1530,7 @@
 				item.params = sanitizeParams(def, {});
 				item.style = {};
 				delete item.levels;
+				delete item.tf;
 				delete item.axisLabel;
 				indicatorsChanged();
 				// 지표 줄을 다시 만들었으므로 설정 창은 차트에 붙여 다시 연다.
@@ -1486,6 +1767,12 @@
 			this.dead = false;
 			this.loadingMore = false;
 			this.noMore = false;
+			// 비교 종목: { symbol, color, series, bars, row, value, timer }
+			this.compares = [];
+			// 바 리플레이: { all, index, timer, speed }
+			this.replay = null;
+			this.picking = false;
+			this.markers = null;
 
 			this.buildDom(host);
 			this.chart = LC.createChart(this.chartHost, {
@@ -1536,6 +1823,7 @@
 				this.updateLegend(index >= 0 && this.bars[index].time === param.time ? index : undefined);
 				if (this.hovered && state.crosshairSync) broadcastCrosshair(this, param.time);
 			});
+			this.chart.subscribeClick(param => this.onChartClick(param));
 			this.chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
 				if (!range) return;
 				if (range.from < 20) this.loadMore();
@@ -1558,14 +1846,20 @@
 				title: '심볼 변경',
 				onclick: () => openSymbolPicker(this.symbolButton, symbol => setSymbol(this, symbol)),
 			});
-			this.intervalButtons = INTERVALS.map(([id, label]) =>
-				el('button', { text: label, onclick: () => this.setInterval(id) }));
+			this.intervalButtons = MAIN_INTERVALS.map(id =>
+				el('button', { text: intervalLabel(id), onclick: () => this.setInterval(id) }));
+			this.moreIntervals = el('button', { class: 'more-int', title: '다른 주기' });
+			this.moreIntervals.addEventListener('click', () => this.openIntervalMenu());
 			this.typeButton = el('button', { class: 'chip', title: '차트 종류', 'data-action': 'type' }, icon('candles'), el('span'));
 			this.typeButton.addEventListener('click', () => this.openTypeMenu());
 			const indicatorButton = el('button', { class: 'chip', title: '지표 검색', 'data-action': 'indicators' }, icon('indicator'), el('span', { text: '지표' }));
 			indicatorButton.addEventListener('click', () => openIndicatorPicker(indicatorButton, this));
-			const alertButton = el('button', { class: 'chip', title: '가격 알림 추가', 'data-action': 'alert' }, icon('bell'), el('span', { text: '알림' }));
+			const alertButton = el('button', { class: 'chip', title: '알림 추가: 가격, 지표 조건, 작도 돌파', 'data-action': 'alert' }, icon('bell'), el('span', { text: '알림' }));
 			alertButton.addEventListener('click', () => openAlertEditor(alertButton, this));
+			const compareButton = el('button', { class: 'chip', title: '종목 비교: 다른 종목을 % 기준으로 겹쳐 봅니다', 'data-action': 'compare' }, icon('plus'), el('span', { text: '비교' }));
+			compareButton.addEventListener('click', () => openSymbolPicker(compareButton, symbol => this.addCompare(symbol)));
+			const strategyButton = el('button', { class: 'chip', title: '전략 백테스트: 조건으로 과거 성과를 계산합니다. AI로 전략을 만들 수도 있습니다', 'data-action': 'backtest' }, icon('indicator'), el('span', { text: '전략' }));
+			strategyButton.addEventListener('click', () => window.ChartDeskLab?.openBacktest());
 
 			const ohlc = el('div', { class: 'legend-row' });
 			const cell = (label) => {
@@ -1596,10 +1890,14 @@
 			this.zoomOutButton.addEventListener('click', () => this.zoomOut());
 			this.body.append(this.zoomOutButton);
 			this.zoomStack = [];
+			this.replayButton = el('button', { class: 'foot-btn', title: '바 리플레이: 고른 봉부터 한 봉씩 다시 보여 줍니다', text: '리플레이', onclick: () => this.toggleReplay() });
+			this.replayBar = el('div', { class: 'replay-bar', hidden: '' });
+			this.body.append(this.replayBar);
 			const foot = el('div', { class: 'pane-foot' },
 				...RANGES.map(([label, interval, count]) =>
 					el('button', { class: 'foot-btn', text: label, onclick: () => this.setRange(interval, count) })),
 				el('span', { class: 'spacer' }),
+				this.replayButton,
 				this.clock,
 				this.sessionButton,
 				this.logButton,
@@ -1608,10 +1906,12 @@
 			this.root = el('div', { class: 'pane' },
 				el('div', { class: 'pane-head' },
 					this.symbolButton,
-					el('div', { class: 'seg' }, ...this.intervalButtons),
+					el('div', { class: 'seg' }, ...this.intervalButtons, this.moreIntervals),
 					this.typeButton,
 					indicatorButton,
-					alertButton),
+					alertButton,
+					compareButton,
+					strategyButton),
 				this.body,
 				foot);
 			this.root.addEventListener('mousedown', () => setActivePane(this.index));
@@ -1631,7 +1931,10 @@
 				logo(this.cfg.symbol),
 				el('span', { text: symbolTitle(this.cfg.symbol) }),
 				el('small', { text: symbolInfo(this.cfg.symbol).exch }));
-			INTERVALS.forEach(([id], i) => this.intervalButtons[i].classList.toggle('on', id === this.cfg.interval));
+			MAIN_INTERVALS.forEach((id, i) => this.intervalButtons[i].classList.toggle('on', id === this.cfg.interval));
+			const extra = !MAIN_INTERVALS.includes(this.cfg.interval);
+			this.moreIntervals.textContent = extra ? `${ intervalLabel(this.cfg.interval) } ▾` : '▾';
+			this.moreIntervals.classList.toggle('on', extra);
 			this.typeButton.lastChild.textContent = CHART_TYPES.find(([id]) => id === this.cfg.chartType)[1];
 			this.refreshScaleButtons();
 		}
@@ -1680,6 +1983,7 @@
 			}
 			this.main.attachPrimitive(this.layer);
 			this.main.setData(this.mainData());
+			if (this.markers) this.markers = LC.createSeriesMarkers(this.main, this.markers.markers());
 			this.priceLines = [];
 			this.syncPriceLines();
 			this.applyScale();
@@ -1735,10 +2039,28 @@
 		applyScale() {
 			const overlayAtBottom = state.indicators.some(item => IND.byId.get(item.type).scale === 'bottom');
 			this.main.priceScale().applyOptions({
-				mode: this.cfg.log ? LC.PriceScaleMode.Logarithmic : LC.PriceScaleMode.Normal,
+				mode: this.compares.length ? LC.PriceScaleMode.Percentage : this.cfg.log ? LC.PriceScaleMode.Logarithmic : LC.PriceScaleMode.Normal,
 				scaleMargins: { top: 0.1, bottom: overlayAtBottom ? 0.22 : 0.08 },
 			});
+			// 가격 눈금의 % ·로그 방식이 보조 패널 지표의 눈금에 번지지 않게 한다.
+			for (let i = 1; i < this.chart.panes().length; i++) this.chart.panes()[i].priceScale('right').applyOptions({ mode: LC.PriceScaleMode.Normal });
 			this.refreshScaleButtons();
+		}
+
+		openIntervalMenu() {
+			const groups = [['분', ['1m', '3m', '5m', '15m', '30m']], ['시간', ['1h', '2h', '4h', '6h', '12h']], ['일 이상', ['1d', '1w', '1M']]];
+			popover.className = 'popover';
+			openPopover(this.moreIntervals, ...groups.flatMap(([title, ids]) => [
+				el('div', { class: 'category', text: title }),
+				el('div', { class: 'int-grid' }, ...ids.map(id => el('button', {
+					class: `option${ id === this.cfg.interval ? ' on' : '' }`,
+					text: intervalLabel(id),
+					onclick: () => {
+						closePopover();
+						this.setInterval(id);
+					},
+				}))),
+			]));
 		}
 
 		openTypeMenu() {
@@ -1968,7 +2290,9 @@
 		buildLegendRow(ind) {
 			const { def, cfg } = ind;
 			const args = def.params.map(param => cfg.params[param.k]).join(' ');
-			const nodes = [el('span', { class: 'ind-name', text: args ? `${ def.short } ${ args }` : def.short })];
+			const frame = this.frameOf(ind);
+			const name = `${ args ? `${ def.short } ${ args }` : def.short }${ frame ? ` · ${ intervalLabel(frame) }` : '' }`;
+			const nodes = [el('span', { class: 'ind-name', text: name })];
 			// 값의 글자 폭이 변해도 버튼이 밀리지 않도록 버튼을 값보다 앞에 둔다.
 			const eye = el('button', { class: 'ind-btn', title: cfg.hidden ? '보이기' : '숨기기' }, icon(cfg.hidden ? 'eyeOff' : 'eye'));
 			eye.addEventListener('click', () => this.toggleIndicator(cfg.id));
@@ -2031,10 +2355,50 @@
 				this.layer.redraw();
 			};
 			for (const ind of this.inds) {
+				const frame = this.frameOf(ind);
+				if (frame) {
+					ind.out = this.computeOnFrame(ind, frame, context);
+					continue;
+				}
 				const wanted = ind.def.basis?.(ind.cfg.params, this.cfg.interval);
 				const own = wanted ? { ...context, basis: basisFor(this.cfg.symbol, wanted, this.basisReady) } : context;
 				ind.out = ind.def.calc(source, ind.cfg.params, own);
 			}
+		}
+
+		/** 지표를 계산할 위 주기. 차트 주기와 같거나 짧으면 null(차트 봉으로 계산). */
+		frameOf(ind) {
+			const frame = ind.cfg.tf;
+			return frame && frameable(ind.def) && INTERVAL_SECONDS[frame] > INTERVAL_SECONDS[this.cfg.interval] ? frame : null;
+		}
+
+		/** 위 주기의 봉으로 지표를 계산해, 차트의 봉마다 그 봉이 속한 위 주기 봉의 값을 놓는다. */
+		computeOnFrame(ind, frame, context) {
+			const count = this.bars.length;
+			const empty = () => Object.fromEntries(ind.def.plots.map(plot => [plot.k, new Array(count).fill(null)]));
+			const basis = basisFor(this.cfg.symbol, frame, this.basisReady);
+			if (!basis.bars?.length) return empty();
+			const merged = mergeFrame(basis.bars, this.bars, frame);
+			let out;
+			try {
+				out = ind.def.calc(IND.source(merged), ind.cfg.params, { ...context, interval: frame });
+			}
+			catch {
+				return empty();
+			}
+			const map = new Array(count);
+			let j = 0;
+			for (let i = 0; i < count; i++) {
+				while (j + 1 < merged.length && merged[j + 1].time <= this.bars[i].time) j++;
+				map[i] = merged[j].time <= this.bars[i].time ? j : -1;
+			}
+			const mapped = {};
+			for (const plot of ind.def.plots) mapped[plot.k] = map.map(index => (index >= 0 ? out[plot.k]?.[index] ?? null : null));
+			if (out.$colors) {
+				mapped.$colors = {};
+				for (const [key, colors] of Object.entries(out.$colors)) mapped.$colors[key] = map.map(index => (index >= 0 ? colors?.[index] : undefined));
+			}
+			return mapped;
 		}
 
 		setIndicatorData() {
@@ -2078,11 +2442,14 @@
 		setAllData() {
 			this.main.setData(this.mainData());
 			this.setIndicatorData();
+			this.compares.forEach(compare => this.showCompare(compare));
 		}
 
 		async load() {
 			const token = ++this.token;
 			const { symbol, interval } = this.cfg;
+			this.endReplay();
+			this.clearTrades();
 			this.closeSocket();
 			this.noMore = false;
 			this.zoomStack = [];
@@ -2106,6 +2473,7 @@
 				this.updateLegend();
 				this.syncPriceLines();
 				this.openSocket(token);
+				this.buildCompares();
 			}
 			catch {
 				if (token !== this.token || this.dead) return;
@@ -2118,7 +2486,7 @@
 		}
 
 		async loadMore() {
-			if (this.loadingMore || this.noMore || this.bars.length === 0) return;
+			if (this.loadingMore || this.noMore || this.bars.length === 0 || this.replay) return;
 			this.loadingMore = true;
 			const token = this.token;
 			const first = this.bars[0];
@@ -2216,6 +2584,12 @@
 				else if (key === 'change') node.textContent = formatPercent(bar.open ? (bar.close - bar.open) / bar.open * 100 : 0);
 				else node.textContent = formatPrice(bar[key], this.precision);
 			}
+			for (const compare of this.compares) {
+				const at = bar ? barIndexAt(compare.bars, bar.time) : -1;
+				const point = compare.bars[at];
+				const first = compare.bars[Math.max(0, barIndexAt(compare.bars, this.bars[0]?.time ?? 0))];
+				compare.value.textContent = point ? `${ formatPrice(point.close) } (${ formatPercent((point.close / first.close - 1) * 100) })` : '–';
+			}
 			for (const ind of this.inds) {
 				for (const plot of ind.def.plots) {
 					const value = bar ? ind.out?.[plot.k]?.[index] : null;
@@ -2232,7 +2606,7 @@
 			for (const line of this.priceLines) this.main.removePriceLine(line);
 			const color = cssColors().warn;
 			this.priceLines = state.alerts
-				.filter(alert => alert.active && alert.symbol === this.cfg.symbol)
+				.filter(alert => alert.active && alert.kind === 'price' && alert.symbol === this.cfg.symbol)
 				.map(alert => this.main.createPriceLine({
 					price: alert.price,
 					color,
@@ -2285,16 +2659,264 @@
 				}));
 			}
 			if (fields.length) nodes.push(iconButton('gear', '설정', { onclick: () => openDrawingSettings(this, drawing) }));
+			if (ALERTABLE_DRAWINGS.has(drawing.type)) {
+				const bell = iconButton('bell', '이 선에 알림: 가격이 넘으면 알립니다');
+				bell.addEventListener('click', () => openAlertEditor(bell, this, 'drawing', drawing.id));
+				nodes.push(bell);
+			}
 			nodes.push(iconButton('trash', '삭제 (Delete)', { onclick: () => removeSelectedDrawing() }));
 			this.drawBar.replaceChildren(...nodes);
 			this.drawBar.hidden = false;
 		}
 
+		// ----- 종목 비교 -----
+
+		addCompare(symbol) {
+			if (symbol === this.cfg.symbol || this.cfg.compare.some(item => item.symbol === symbol)) return;
+			if (this.cfg.compare.length >= 5) {
+				toast('비교 종목은 5개까지 넣을 수 있습니다.');
+				return;
+			}
+			const used = new Set(this.cfg.compare.map(item => item.color));
+			const color = PALETTE.find(candidate => !used.has(candidate)) ?? PALETTE[0];
+			this.cfg.compare.push({ symbol, color });
+			save();
+			this.buildCompares();
+		}
+
+		removeCompare(symbol) {
+			this.cfg.compare = this.cfg.compare.filter(item => item.symbol !== symbol);
+			save();
+			this.buildCompares();
+		}
+
+		/** 비교 종목 선을 가격 패널에 얹는다. 비교 중에는 가격 눈금이 %로 바뀌어 화면 왼쪽 끝 봉을 0%로 맞춘다. */
+		buildCompares() {
+			for (const compare of this.compares) {
+				clearInterval(compare.timer);
+				this.chart.removeSeries(compare.series);
+				compare.row.remove();
+			}
+			const token = this.token;
+			this.compares = this.cfg.compare.map((item) => {
+				const series = this.chart.addSeries(LC.LineSeries, {
+					color: item.color,
+					lineWidth: 2,
+					priceLineVisible: false,
+					lastValueVisible: true,
+					crosshairMarkerVisible: false,
+					title: symbolTitle(item.symbol),
+				}, 0);
+				const value = el('b');
+				const remove = el('button', { class: 'ind-btn', title: '비교 끄기' }, icon('close'));
+				const swatch = el('i', { class: 'swatch' });
+				swatch.style.background = item.color;
+				const row = el('div', { class: 'legend-row cmp-row' }, swatch, el('span', { class: 'ind-name', text: symbolTitle(item.symbol) }), el('span', { class: 'ind-actions' }, remove), value);
+				remove.addEventListener('click', () => this.removeCompare(item.symbol));
+				this.legend.append(row);
+				return { ...item, series, bars: [], row, value, timer: 0 };
+			});
+			this.applyScale();
+			for (const compare of this.compares) this.loadCompare(compare, token);
+		}
+
+		async loadCompare(compare, token) {
+			const interval = this.cfg.interval;
+			try {
+				const { bars } = await loadBars(compare.symbol, interval);
+				if (token !== this.token || this.dead || !this.compares.includes(compare)) return;
+				compare.bars = bars;
+				const range = this.chart.timeScale().getVisibleLogicalRange();
+				this.showCompare(compare);
+				if (range) this.chart.timeScale().setVisibleLogicalRange(range);
+				this.updateLegend();
+			}
+			catch {
+				compare.value.textContent = '불러오지 못함';
+				return;
+			}
+			compare.timer = setInterval(async() => {
+				if (document.hidden || this.replay) return;
+				try {
+					const fresh = await loadTail(compare.symbol, interval);
+					if (token !== this.token || this.dead) return;
+					for (const bar of fresh) {
+						const last = compare.bars[compare.bars.length - 1];
+						if (last && bar.time < last.time) continue;
+						if (last && bar.time === last.time) compare.bars[compare.bars.length - 1] = bar;
+						else compare.bars.push(bar);
+						compare.series.update({ time: bar.time, value: bar.close });
+					}
+				}
+				catch {
+					// 다음 주기에 다시 받는다.
+				}
+			}, 5000);
+		}
+
+		/**
+		 * 비교 선을 그린다. 차트의 첫 봉보다 앞은 그리지 않는다(앞에 시간이 늘어나면 보던 화면이 과거로 밀린다).
+		 * 리플레이 중에는 지금 보이는 봉까지만 그린다.
+		 */
+		showCompare(compare) {
+			const from = this.bars[0]?.time ?? Infinity;
+			const until = this.replay ? this.bars[this.bars.length - 1]?.time ?? -Infinity : Infinity;
+			compare.series.setData(compare.bars.filter(bar => bar.time >= from && bar.time <= until).map(bar => ({ time: bar.time, value: bar.close })));
+		}
+
+		// ----- 바 리플레이 -----
+
+		toggleReplay() {
+			if (this.replay || this.picking) {
+				this.endReplay(true);
+				return;
+			}
+			if (this.bars.length < 10) return;
+			this.picking = true;
+			this.body.classList.add('picking');
+			this.replayButton.classList.add('on');
+			this.replayBar.replaceChildren(
+				el('b', { text: '리플레이' }),
+				el('span', { text: '시작할 봉을 차트에서 누르세요' }),
+				el('button', { class: 'text-btn', text: '취소 (Esc)', onclick: () => this.endReplay(true) }));
+			this.replayBar.hidden = false;
+		}
+
+		onChartClick(param) {
+			if (!this.picking || param.time === undefined) return;
+			const index = barIndexAt(this.bars, param.time);
+			if (index < 1) return;
+			this.picking = false;
+			this.body.classList.remove('picking');
+			this.startReplay(index);
+		}
+
+		startReplay(index, all = this.bars) {
+			this.closeSocket();
+			clearInterval(this.replay?.timer);
+			this.replay = { all, index, timer: 0, speed: this.replay?.speed ?? 2 };
+			this.bars = all.slice(0, index + 1);
+			this.setAllData();
+			this.compares.forEach(compare => this.showCompare(compare));
+			this.chart.timeScale().scrollToRealTime();
+			this.updateLegend();
+			this.renderReplayBar();
+		}
+
+		renderReplayBar() {
+			const replay = this.replay;
+			if (!replay) return;
+			const playing = replay.timer !== 0;
+			const speeds = [1, 2, 5, 10, 30];
+			const button = (text, title, onClick) => el('button', { class: 'text-btn', text, title, onclick: onClick });
+			const speed = selectInput(replay.speed, speeds.map(value => [value, `${ value }봉/초`]), (value) => {
+				replay.speed = Number(value);
+				if (replay.timer) this.playReplay(true);
+			});
+			const time = this.bars[this.bars.length - 1]?.time;
+			this.replayBar.replaceChildren(
+				el('b', { text: '리플레이' }),
+				button('⟲', '다른 시작 봉 고르기', () => {
+					clearInterval(replay.timer);
+					replay.timer = 0;
+					const all = replay.all;
+					this.bars = all;
+					this.setAllData();
+					this.replay = null;
+					this.replayBar.hidden = true;
+					this.toggleReplay();
+				}),
+				button(playing ? '⏸' : '▶', playing ? '멈춤' : '재생', () => this.playReplay(!playing)),
+				button('⏭', '한 봉 앞으로', () => this.stepReplay()),
+				speed,
+				el('span', { class: 'replay-pos', text: `${ time === undefined ? '' : new Date((time - TZ_OFFSET) * 1000).toLocaleString('ko-KR', { year: '2-digit', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) } · 남은 봉 ${ replay.all.length - 1 - replay.index }` }),
+				button('✕', '리플레이 끝내기', () => this.endReplay(true)));
+			this.replayBar.hidden = false;
+		}
+
+		playReplay(on) {
+			const replay = this.replay;
+			if (!replay) return;
+			clearInterval(replay.timer);
+			replay.timer = on ? setInterval(() => this.stepReplay(), 1000 / replay.speed) : 0;
+			this.renderReplayBar();
+		}
+
+		stepReplay() {
+			const replay = this.replay;
+			if (!replay) return;
+			if (replay.index >= replay.all.length - 1) {
+				this.playReplay(false);
+				toast('리플레이: 마지막 봉까지 봤습니다.');
+				return;
+			}
+			replay.index++;
+			this.bars.push(replay.all[replay.index]);
+			const data = this.mainData();
+			this.main.update(data[data.length - 1]);
+			this.updateIndicatorTail();
+			for (const compare of this.compares) {
+				const at = barIndexAt(compare.bars, this.bars[this.bars.length - 1].time);
+				if (at >= 0) compare.series.update({ time: compare.bars[at].time, value: compare.bars[at].close });
+			}
+			this.updateLegend();
+			this.renderReplayBar();
+		}
+
+		/** 리플레이를 끝낸다. reload면 최신 봉을 다시 받고 실시간으로 돌아간다. */
+		endReplay(reload = false) {
+			const wasActive = this.replay !== null || this.picking;
+			if (this.replay) clearInterval(this.replay.timer);
+			this.replay = null;
+			this.picking = false;
+			this.body.classList.remove('picking');
+			this.replayBar.hidden = true;
+			this.replayButton.classList.remove('on');
+			if (reload && wasActive) this.load();
+		}
+
+		// ----- 백테스트 거래 표시 -----
+
+		showTrades(markers) {
+			this.clearTrades();
+			this.markers = LC.createSeriesMarkers(this.main, markers);
+		}
+
+		clearTrades() {
+			this.markers?.detach();
+			this.markers = null;
+		}
+
+		/** 백테스트가 받아 온 과거 봉을 앞에 붙인다. */
+		prependBars(older) {
+			if (this.replay || older.length === 0 || this.bars.length === 0) return;
+			const first = this.bars[0].time;
+			const before = older.filter(bar => bar.time < first);
+			if (before.length === 0) return;
+			const range = this.chart.timeScale().getVisibleLogicalRange();
+			this.bars = before.concat(this.bars);
+			this.setAllData();
+			if (range) this.chart.timeScale().setVisibleLogicalRange({ from: range.from + before.length, to: range.to + before.length });
+		}
+
+		/** 그 시각의 봉이 화면 가운데 오게 옮긴다. */
+		scrollToTime(time) {
+			const index = barIndexAt(this.bars, time);
+			if (index < 0) return;
+			const range = this.chart.timeScale().getVisibleLogicalRange();
+			const width = range ? range.to - range.from : 100;
+			this.chart.timeScale().setVisibleLogicalRange({ from: index - width / 2, to: index + width / 2 });
+		}
+
 		/** 지금 봉이 마감될 때까지 남은 시간. 장이 닫혀 봉이 더 만들어지지 않으면 null. */
 		countdown() {
 			const last = this.bars[this.bars.length - 1];
-			const seconds = INTERVAL_SECONDS[this.cfg.interval];
-			if (!last || !seconds) return null;
+			let seconds = INTERVAL_SECONDS[this.cfg.interval];
+			if (!last || !seconds || this.replay) return null;
+			if (this.cfg.interval === '1M') {
+				const start = new Date((last.time - TZ_OFFSET) * 1000);
+				seconds = Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1) / 1000 + TZ_OFFSET - last.time;
+			}
 			// 장이 정해진 종목의 일봉·주봉은 봉의 끝이 자정이 아니라 장 마감이라 표시하지 않는다.
 			if (seconds >= 86400 && !PROV.resolve(this.cfg.symbol).provider.realtime && PROV.resolve(this.cfg.symbol).provider.sessions) return null;
 			const left = Math.round(last.time + seconds - (Date.now() / 1000 + TZ_OFFSET));
@@ -2318,7 +2940,9 @@
 
 		destroy() {
 			this.dead = true;
+			this.endReplay();
 			this.closeSocket();
+			this.compares.forEach(compare => clearInterval(compare.timer));
 			this.resizeObserver.disconnect();
 			this.layer.destroy();
 			this.chart.remove();
@@ -3122,7 +3746,9 @@
 	document.addEventListener('keydown', (event) => {
 		const typing = event.target instanceof HTMLElement && event.target.matches('input, textarea, select');
 		if (event.key === 'Escape') {
-			if (!popover.hidden) closePopover();
+			const picking = panes.find(pane => pane.picking);
+			if (picking) picking.endReplay(true);
+			else if (!popover.hidden) closePopover();
 			else if (activeTool) setTool(null);
 			else {
 				panes.forEach((pane) => {
@@ -3164,13 +3790,71 @@
 		}
 	});
 
+	// 휴대폰의 뒤로 가기: 열린 창을 하나씩 닫는다. 닫을 것이 없으면 false(앱이 뒤로 간다).
+	window.chartdeskBack = () => {
+		if (window.ChartDeskLab?.close()) return true;
+		if (!popover.hidden) {
+			closePopover();
+			return true;
+		}
+		const busy = panes.find(pane => pane.picking || pane.replay);
+		if (busy) {
+			busy.endReplay(true);
+			return true;
+		}
+		const ai = $('ai-panel');
+		if (!ai.hidden) {
+			ai.querySelector('.ai-head .icon-btn[title="닫기"]')?.click();
+			return true;
+		}
+		return false;
+	};
+
 	// ---------- AI 창이 쓰는 창구 ----------
 
 	window.ChartDeskApp = {
 		el,
+		icon,
 		toast,
 		formatPrice,
+		formatPercent,
+		formatVolume,
 		tzOffset: TZ_OFFSET,
+		INTERVALS,
+		INTERVAL_SECONDS,
+		intervalLabel,
+		symbolTitle,
+		symbolInfo,
+		logo,
+		loadBars,
+		quote: id => ticker.prices.get(id) ?? null,
+		watchlist: () => [...state.watchlist],
+		indicators: () => state.indicators.map(item => ({ type: item.type, params: { ...item.params } })),
+		closePopover,
+		/** 백테스트·스크리너가 쓰는 지금 차트. */
+		pane() {
+			const pane = activePane();
+			if (!pane) return null;
+			return {
+				symbol: pane.cfg.symbol,
+				interval: pane.cfg.interval,
+				bars: pane.bars,
+				precision: pane.precision,
+				noPaging: PROV.resolve(pane.cfg.symbol).provider.noPaging === true,
+				replaying: pane.replay !== null,
+				showTrades: markers => pane.showTrades(markers),
+				clearTrades: () => pane.clearTrades(),
+				prependBars: bars => pane.prependBars(bars),
+				scrollToTime: time => pane.scrollToTime(time),
+			};
+		},
+		/** 지금 차트의 종목(과 주기)을 바꾼다. */
+		show(symbol, interval) {
+			const pane = activePane();
+			if (!pane) return;
+			setSymbol(pane, symbol);
+			if (interval) pane.setInterval(interval);
+		},
 		onChange: listener => changeListeners.push(listener),
 		/** 지금 보고 있는 차트의 종목, 봉, 지표 값, 사용자가 그은 수평선. */
 		snapshot() {
@@ -3182,7 +3866,7 @@
 				info: symbolInfo(id),
 				title: symbolTitle(id),
 				interval: pane.cfg.interval,
-				intervalLabel: `${ INTERVALS.find(([key]) => key === pane.cfg.interval)[1] }봉`,
+				intervalLabel: `${ intervalLabel(pane.cfg.interval) }봉`,
 				bars: pane.bars,
 				precision: pane.precision,
 				quote: ticker.prices.get(id) ?? null,
@@ -3209,4 +3893,6 @@
 	renderWorkspace();
 	refreshTools();
 	setInterval(() => panes.forEach(pane => pane.tick()), 1000);
+	setInterval(checkCondAlerts, 15000);
+	setTimeout(checkCondAlerts, 3000);
 })();

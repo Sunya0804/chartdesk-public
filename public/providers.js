@@ -76,6 +76,29 @@ window.ChartDeskProviders = (() => {
 		};
 	}
 
+	/**
+	 * 짧은 봉을 seconds 길이로 묶는다(UTC 기준 경계). 거래소가 그 주기를 주지 않을 때 쓴다.
+	 * 맨 앞 묶음은 앞부분 봉이 빠져 있을 수 있어 버린다.
+	 */
+	function aggregate(bars, seconds) {
+		const out = [];
+		for (const bar of bars) {
+			const time = Math.floor(bar.time / seconds) * seconds;
+			const last = out[out.length - 1];
+			if (last && last.time === time) {
+				last.high = Math.max(last.high, bar.high);
+				last.low = Math.min(last.low, bar.low);
+				last.close = bar.close;
+				last.volume += bar.volume;
+			}
+			else {
+				out.push({ ...bar, time, partial: bar.time !== time });
+			}
+		}
+		if (out[0]?.partial) out.shift();
+		return out.map(({ partial, ...bar }) => bar);
+	}
+
 	function decimalsOf(text) {
 		const dot = text.indexOf('.');
 		return dot < 0 ? 0 : text.slice(dot + 1).replace(/0+$/, '').length;
@@ -198,7 +221,12 @@ window.ChartDeskProviders = (() => {
 
 	// ---------- Upbit, Bithumb: 같은 형식의 공개 API ----------
 
-	const UPBIT_PATHS = { '1m': 'minutes/1', '5m': 'minutes/5', '15m': 'minutes/15', '30m': 'minutes/30', '1h': 'minutes/60', '4h': 'minutes/240', '1d': 'days', '1w': 'weeks' };
+	const UPBIT_PATHS = {
+		'1m': 'minutes/1', '3m': 'minutes/3', '5m': 'minutes/5', '15m': 'minutes/15', '30m': 'minutes/30', '1h': 'minutes/60', '4h': 'minutes/240',
+		'1d': 'days', '1w': 'weeks', '1M': 'months',
+	};
+	// Upbit·Bithumb에 없는 주기는 1시간봉을 묶어 만든다.
+	const UPBIT_GROUPED = { '2h': 7200, '6h': 21600, '12h': 43200 };
 
 	// toOffsetHours: to 값을 해석하는 시간대. Upbit은 UTC, Bithumb은 한국 시간으로 읽는다.
 	function upbitLike({ id, label, base, toOffsetHours }) {
@@ -214,6 +242,21 @@ window.ChartDeskProviders = (() => {
 			},
 
 			async klines(code, interval, endMs, limit = 200) {
+				const seconds = UPBIT_GROUPED[interval];
+				if (seconds) {
+					// 1시간봉을 최대 4번(800개)까지 이어 받아 묶는다.
+					let hours = [];
+					let before = endMs;
+					const need = Math.min(800, limit * seconds / 3600 + seconds / 3600);
+					while (hours.length < need) {
+						const page = (await this.klines(code, '1h', before, 200)).bars;
+						if (page.length === 0) break;
+						hours = page.concat(hours);
+						before = page[0].time * 1000;
+						if (page.length < 200) break;
+					}
+					return { bars: aggregate(hours, seconds) };
+				}
 				const query = new URLSearchParams({ market: code, count: String(Math.min(limit, 200)) });
 				// to는 그 시각보다 앞선 봉만 돌려준다.
 				if (endMs !== undefined) query.set('to', new Date(endMs + toOffsetHours * 3600000).toISOString().slice(0, 19));
@@ -254,7 +297,10 @@ window.ChartDeskProviders = (() => {
 
 	// ---------- Bybit (현물, USDT 무기한 선물) ----------
 
-	const BYBIT_INTERVALS = { '1m': '1', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240', '1d': 'D', '1w': 'W' };
+	const BYBIT_INTERVALS = {
+		'1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '2h': '120', '4h': '240', '6h': '360', '12h': '720',
+		'1d': 'D', '1w': 'W', '1M': 'M',
+	};
 
 	function bybit({ id, label, category, type, suffix }) {
 		const base = 'https://api.bybit.com/v5/market';
@@ -318,7 +364,10 @@ window.ChartDeskProviders = (() => {
 
 	// ---------- OKX (현물, USDT 무기한 선물) ----------
 
-	const OKX_BARS = { '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1H', '4h': '4H', '1d': '1Dutc', '1w': '1Wutc' };
+	const OKX_BARS = {
+		'1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1H', '2h': '2H', '4h': '4H', '6h': '6Hutc', '12h': '12Hutc',
+		'1d': '1Dutc', '1w': '1Wutc', '1M': '1Mutc',
+	};
 
 	function okx({ id, label, instType, type, suffix }) {
 		const base = 'https://www.okx.com/api/v5';
@@ -387,13 +436,19 @@ window.ChartDeskProviders = (() => {
 	// 주기별로 한 번에 받을 수 있는 기간이 정해져 있어 과거 이어 받기는 하지 않는다.
 	const YAHOO_FRAMES = {
 		'1m': { interval: '1m', range: '5d', tail: '1d', seconds: 60 },
+		'3m': { interval: '1m', range: '5d', tail: '1d', seconds: 60, bucket: 180 },
 		'5m': { interval: '5m', range: '1mo', tail: '1d', seconds: 300 },
 		'15m': { interval: '15m', range: '1mo', tail: '1d', seconds: 900 },
 		'30m': { interval: '30m', range: '1mo', tail: '1d', seconds: 1800 },
 		'1h': { interval: '60m', range: '6mo', tail: '5d', seconds: 3600 },
+		'2h': { interval: '60m', range: '1y', tail: '5d', seconds: 3600, group: 2 },
 		'4h': { interval: '60m', range: '2y', tail: '5d', seconds: 3600, group: 4 },
+		'6h': { interval: '60m', range: '2y', tail: '5d', seconds: 3600, group: 6 },
+		'12h': { interval: '60m', range: '2y', tail: '5d', seconds: 3600, group: 12 },
 		'1d': { interval: '1d', range: '5y', tail: '5d', daily: 1 },
 		'1w': { interval: '1wk', range: 'max', tail: '1mo', daily: 7 },
+		// range=max로 받으면 3개월 간격으로 줄여서 준다.
+		'1M': { interval: '1mo', range: '20y', tail: '1y', daily: 30 },
 	};
 	const YAHOO_TYPES = { EQUITY: 'stock', ETF: 'fund', MUTUALFUND: 'fund', INDEX: 'index', CURRENCY: 'fx', FUTURE: 'futures' };
 
@@ -456,8 +511,11 @@ window.ChartDeskProviders = (() => {
 			const previous = bars[bars.length - 1];
 			if (frame.daily) {
 				const day = Math.floor((stamp + offset) / 86400);
-				// 1970-01-01은 목요일. 주봉은 그 주 월요일로 맞춘다.
-				const start = frame.daily === 7 ? day - ((day + 3) % 7) : day;
+				// 1970-01-01은 목요일. 주봉은 그 주 월요일로, 월봉은 그 달 1일로 맞춘다.
+				const date = new Date(day * 86400000);
+				const start = frame.daily === 7 ? day - ((day + 3) % 7)
+					: frame.daily === 30 ? Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1) / 86400000
+						: day;
 				time = start * 86400 - offset;
 			}
 			else if (i === stamps.length - 1 && previous && (stamp - previous.time) % frame.seconds !== 0) {
@@ -483,9 +541,25 @@ window.ChartDeskProviders = (() => {
 				bar.volume = Math.max(bar.volume, volumeOf(bar.time, end));
 			});
 		}
+		// 3분봉은 1분봉을 시각 기준으로 묶는다(거래가 없는 분이 있어 개수로 묶으면 어긋난다).
+		if (frame.bucket) {
+			const out = [];
+			for (const bar of bars) {
+				const time = Math.floor(bar.time / frame.bucket) * frame.bucket;
+				const target = out[out.length - 1];
+				if (target && target.time === time) {
+					target.high = Math.max(target.high, bar.high);
+					target.low = Math.min(target.low, bar.low);
+					target.close = bar.close;
+					target.volume += bar.volume;
+				}
+				else out.push({ ...bar, time });
+			}
+			return out;
+		}
 		if (!frame.group) return bars;
 
-		// 4시간봉은 1시간봉을 거래일 안에서 네 개씩 묶는다.
+		// 2·4·6·12시간봉은 1시간봉을, 3분봉은 1분봉을 거래일 안에서 묶는다.
 		const grouped = [];
 		let day = null;
 		let count = 0;

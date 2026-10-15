@@ -1199,9 +1199,9 @@ window.ChartDeskIndicators = (() => {
 	}
 
 	// 짧은 주기의 전환점은 잡음이 많아 구간이 화면을 덮는다. 지지·저항은 한 단계 위 주기의 봉으로 찾는다.
-	const ZONE_BASIS_AUTO = { '1m': '1h', '5m': '1h', '15m': '4h', '30m': '4h', '1h': '1d' };
+	const ZONE_BASIS_AUTO = { '1m': '1h', '3m': '1h', '5m': '1h', '15m': '4h', '30m': '4h', '1h': '1d', '2h': '1d' };
 	const ZONE_BASIS_CHOICES = [null, null, '1h', '4h', '1d'];
-	const ZONE_BASIS_ORDER = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'];
+	const ZONE_BASIS_ORDER = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w', '1M'];
 	const ZONE_BASIS_NAMES = { '1h': '1시간봉', '4h': '4시간봉', '1d': '일봉' };
 
 	/** 지지·저항을 찾을 주기. 차트 주기와 같거나 짧으면 null(차트 봉을 그대로 쓴다). */
@@ -1978,6 +1978,8 @@ window.ChartDeskIndicators = (() => {
 			move,
 			three,
 			$colors: { three: signed(three) },
+			// 조건 알림·백테스트·스크리너가 쓰는 타점 신호 전체(봉 번호와 종류).
+			$signals: events.map(({ index, kind }) => ({ index, kind })),
 			$draw: { spans: spans.slice(-40), marks: marks.slice(-60), lines, tones, upper, lower, top, bottom, events: p.plan >= 1 ? events.slice(-80) : [], plan: p.plan >= 1 && plan ? { ...plan, name: WONYO_PLANS[plan.kind].name } : null },
 		};
 	}

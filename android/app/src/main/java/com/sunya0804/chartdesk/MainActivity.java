@@ -24,6 +24,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 
@@ -119,8 +120,29 @@ public class MainActivity extends Activity {
             });
         }
         setContentView(root);
+        // 뒤로 가기는 화면에 열린 창(백테스트, 팝업, AI 창)부터 닫는다.
+        if (Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
+        }
         web.loadUrl(origin + "/");
         handleIntent(getIntent());
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override
+    public void onBackPressed() {
+        handleBack();
+    }
+
+    /** 화면이 닫을 창이 없다고 하면 앱을 뒤로 보낸다(앱 안의 서버와 화면은 그대로 둔다). */
+    private void handleBack() {
+        if (web == null) {
+            moveTaskToBack(true);
+            return;
+        }
+        web.evaluateJavascript("window.chartdeskBack ? window.chartdeskBack() : false", value -> {
+            if (!"true".equals(value)) moveTaskToBack(true);
+        });
     }
 
     @Override
