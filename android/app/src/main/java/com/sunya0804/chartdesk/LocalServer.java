@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -286,17 +287,60 @@ final class LocalServer {
             allowed |= url.getProtocol().equals("https") && url.getHost().equals(route[0]) && url.getPath().startsWith(route[1]);
         }
         if (!allowed) throw new Failure(403, "Forbidden");
+        String key = url.toString();
+        Cached hit;
+        synchronized (PROXY_CACHE) {
+            hit = PROXY_CACHE.get(key);
+        }
+        if (hit != null && System.currentTimeMillis() - hit.at < cacheTtl(url)) {
+            send(out, 200, hit.type, hit.body);
+            return;
+        }
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setConnectTimeout(15000);
         connection.setReadTimeout(15000);
         connection.setRequestProperty("User-Agent", "Mozilla/5.0 (ChartDesk Android)");
-        connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("Accept", "application/json, application/rss+xml;q=0.9, */*;q=0.8");
         try {
             int status = connection.getResponseCode();
-            send(out, status, TYPES.get("json"), readAll(bodyOf(connection)));
+            // 받은 형식을 그대로 알려 준다(Yahoo는 JSON, Google 뉴스는 RSS).
+            String type = connection.getContentType() != null ? connection.getContentType() : "application/octet-stream";
+            byte[] body = readAll(bodyOf(connection));
+            if (status == 200) {
+                synchronized (PROXY_CACHE) {
+                    PROXY_CACHE.put(key, new Cached(type, body));
+                }
+            }
+            send(out, status, type, body);
         } finally {
             connection.disconnect();
         }
+    }
+
+    // 대신 불러 온 응답을 잠깐 기억한다. 같은 주소를 여러 번 부르면 한 번만 받아 차단될 위험을 줄인다.
+    // 시세(차트)는 실시간에 가까워야 하므로 짧게(3초) 둔다. 오래된 것부터 300개까지만 남긴다.
+    private static final class Cached {
+        final long at = System.currentTimeMillis();
+        final String type;
+        final byte[] body;
+
+        Cached(String type, byte[] body) {
+            this.type = type;
+            this.body = body;
+        }
+    }
+
+    private static final Map<String, Cached> PROXY_CACHE = new LinkedHashMap<String, Cached>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Cached> eldest) {
+            return size() > 300;
+        }
+    };
+
+    private static long cacheTtl(URL url) {
+        if (url.getHost().equals("news.google.com")) return 5 * 60_000L;
+        if (url.getPath().startsWith("/v1/finance/search")) return 60_000L;
+        return 3_000L;
     }
 
     // ---------- AI ----------

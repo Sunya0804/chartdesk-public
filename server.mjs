@@ -1,6 +1,7 @@
 // 정적 파일과, 브라우저에서 직접 부를 수 없는 주소(시세, AI)를 대신 불러 주는 로컬 서버. 외부 의존성 없음.
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -32,6 +33,51 @@ const sendJson = (res, status, body) => {
   res.end(JSON.stringify(body));
 };
 
+// 대신 불러 온 응답을 잠깐 기억한다. 같은 주소를 여러 번 부르면 한 번만 받아 차단될 위험을 줄인다.
+// 시세(차트)는 실시간에 가까워야 하므로 동시에 몰린 요청만 합치는 정도(3초)로 둔다.
+const proxyCache = new Map();
+const proxyPending = new Map();
+const PROXY_CACHE_LIMIT = 300;
+
+function cacheTtl(url) {
+  if (url.hostname === "news.google.com") return 5 * 60_000;
+  if (url.pathname.startsWith("/v1/finance/search")) return 60_000;
+  return 3_000;
+}
+
+async function cachedFetch(url) {
+  const key = url.href;
+  const hit = proxyCache.get(key);
+  if (hit && Date.now() - hit.at < cacheTtl(url)) return hit;
+  if (proxyPending.has(key)) return proxyPending.get(key);
+  const request = (async () => {
+    const upstream = await fetch(url, {
+      headers: { "user-agent": "Mozilla/5.0 (ChartDesk local)", accept: "application/json, application/rss+xml;q=0.9, */*;q=0.8" },
+      signal: AbortSignal.timeout(15000),
+    });
+    const result = {
+      at: Date.now(),
+      status: upstream.status,
+      // 받은 형식을 그대로 알려 준다(Yahoo는 JSON, Google 뉴스는 RSS).
+      type: upstream.headers.get("content-type") ?? "application/octet-stream",
+      body: Buffer.from(await upstream.arrayBuffer()),
+    };
+    if (upstream.ok) {
+      proxyCache.delete(key);
+      proxyCache.set(key, result);
+      // 오래된 것부터 지운다(Map은 넣은 순서를 지킨다).
+      while (proxyCache.size > PROXY_CACHE_LIMIT) proxyCache.delete(proxyCache.keys().next().value);
+    }
+    return result;
+  })();
+  proxyPending.set(key, request);
+  try {
+    return await request;
+  } finally {
+    proxyPending.delete(key);
+  }
+}
+
 async function proxy(target, res) {
   let url;
   try {
@@ -48,13 +94,9 @@ async function proxy(target, res) {
     return;
   }
   try {
-    const upstream = await fetch(url, {
-      headers: { "user-agent": "Mozilla/5.0 (ChartDesk local)", accept: "application/json" },
-      signal: AbortSignal.timeout(15000),
-    });
-    const body = Buffer.from(await upstream.arrayBuffer());
-    res.writeHead(upstream.status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-    res.end(body);
+    const result = await cachedFetch(url);
+    res.writeHead(result.status, { "content-type": result.type, "cache-control": "no-store" });
+    res.end(result.body);
   } catch (error) {
     sendJson(res, 502, { error: String(error?.message ?? error) });
   }
@@ -522,8 +564,30 @@ const extendedFeed = await import("./local/tv-feed.mjs").catch((error) => {
   throw error;
 });
 
+// ---------- 접근 확인 ----------
+// 1) 주소(Host)가 이 서버(127.0.0.1·localhost의 이 포트)가 아니면 거절한다. 다른 사이트가 자기 도메인을 127.0.0.1로
+//    돌려 이 서버를 부르는 방법(DNS 리바인딩)을 막는다.
+// 2) /api/는 첫 페이지를 받을 때 심어 둔 쿠키가 있어야 받는다. 쿠키는 서버를 켤 때마다 새로 만든다.
+//    같은 컴퓨터의 다른 프로그램이나 웹페이지가 키 상태를 보거나 대리 호출을 쓰지 못하게 한다(안드로이드 앱과 같은 방식).
+const TOKEN_COOKIE = "chartdesk_token";
+const token = randomBytes(24).toString("base64url");
+
+const allowedHost = (host) => host === `127.0.0.1:${port}` || host === `localhost:${port}`;
+
+function hasToken(req) {
+  return (req.headers.cookie ?? "").split(";").some((part) => part.trim() === `${TOKEN_COOKIE}=${token}`);
+}
+
 const server = createServer(async (req, res) => {
+  if (!allowedHost(req.headers.host)) {
+    res.writeHead(403, { "content-type": "text/plain; charset=utf-8" }).end("Forbidden");
+    return;
+  }
   const requestUrl = new URL(req.url, "http://localhost");
+  if (requestUrl.pathname.startsWith("/api/") && !hasToken(req)) {
+    sendJson(res, 403, { error: "페이지를 새로 고친 뒤 다시 시도하세요" });
+    return;
+  }
   if (requestUrl.pathname === "/api/tv/bars") {
     if (req.method !== "GET") {
       res.writeHead(405).end();
@@ -558,10 +622,13 @@ const server = createServer(async (req, res) => {
   }
   try {
     const body = await readFile(file);
-    res.writeHead(200, {
+    const headers = {
       "content-type": types[extname(file)] ?? "application/octet-stream",
       "cache-control": "no-store",
-    });
+    };
+    // 화면을 받을 때 /api/용 쿠키를 심는다. 화면의 스크립트는 읽을 수 없게(HttpOnly) 하고, 이 사이트 안에서만 보낸다.
+    if (file === join(root, "index.html")) headers["set-cookie"] = `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict`;
+    res.writeHead(200, headers);
     res.end(body);
   } catch {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("Not found");

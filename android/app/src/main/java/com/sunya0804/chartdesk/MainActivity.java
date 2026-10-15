@@ -13,6 +13,8 @@ import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Base64;
 import android.view.View;
 import android.view.WindowInsets;
@@ -48,6 +50,16 @@ public class MainActivity extends Activity {
     private byte[] pendingSave;
     private int notifyRequest;
     private int notificationId;
+    // 켜진 가격 알림이 있으면 AlertService를 띄워 앱을 내려도 확인을 이어 간다. 1분마다 다시 본다.
+    private static final String ACTIVE_ALERTS = "(JSON.parse(localStorage.getItem('chartdesk.workspace.v1') || 'null')?.alerts || []).some(a => a.active)";
+    private static final long WATCH_EVERY_MS = 60_000L;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable watchTick = () -> {
+        syncAlertService();
+        handler.postDelayed(this.watchTick, WATCH_EVERY_MS);
+    };
+    private boolean watching;
+    private boolean visible;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -148,7 +160,38 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        visible = true;
         if (updater != null) updater.checkIfDue();
+        handler.removeCallbacks(watchTick);
+        handler.post(watchTick);
+    }
+
+    @Override
+    protected void onPause() {
+        // 화면이 아직 앞에 있을 때 마지막으로 확인한다(뒤로 간 앱은 포그라운드 서비스를 새로 시작할 수 없다).
+        syncAlertService();
+        visible = false;
+        super.onPause();
+    }
+
+    /** 화면에 켜진 알림이 있는지 보고 AlertService를 켜거나 끈다. */
+    private void syncAlertService() {
+        if (web == null) return;
+        boolean canStart = visible;
+        web.evaluateJavascript(ACTIVE_ALERTS, value -> {
+            boolean active = "true".equals(value);
+            if (active && !watching && canStart) {
+                try {
+                    AlertService.start(this);
+                    watching = true;
+                } catch (RuntimeException notAllowed) {
+                    // 뒤로 간 뒤라 시작이 막히면 다음에 앱을 열 때 다시 시도한다.
+                }
+            } else if (!active && watching) {
+                AlertService.stop(this);
+                watching = false;
+            }
+        });
     }
 
     @Override
@@ -163,6 +206,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        handler.removeCallbacks(watchTick);
+        AlertService.stop(this);
         if (server != null) server.stop();
         if (updater != null) updater.stop();
         if (web != null) web.destroy();

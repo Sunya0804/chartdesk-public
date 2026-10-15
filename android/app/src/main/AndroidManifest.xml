@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 가격 알림 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 앱을 내려도 켜 둔 가격 알림을 계속 확인 (AlertService) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- 새 버전 APK 설치 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
@@ -27,5 +30,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".AlertService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="앱을 내린 뒤에도 사용자가 켜 둔 가격 알림을 확인한다" />
+        </service>
     </application>
 </manifest>

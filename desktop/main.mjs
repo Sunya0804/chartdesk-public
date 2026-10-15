@@ -1,6 +1,6 @@
 // 데스크톱 앱. server.mjs를 이 프로세스 안에서 띄우고 그 주소를 창에 연다.
 // 새 버전은 GitHub Releases(Sunya0804/chartdesk-public)에서 받는다.
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell, Tray } from "electron";
 import electronUpdater from "electron-updater";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,6 +16,10 @@ const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 let window = null;
 let origin = "";
 let updateStatus = "";
+// 켜진 알림이 있을 때 창을 닫으면 트레이로 숨겨 알림 확인을 이어 간다. 트레이 메뉴의 "종료"로만 완전히 끈다.
+let tray = null;
+let quitting = false;
+let toldAboutTray = false;
 
 const log = (text) => appendFile(join(app.getPath("userData"), "update.log"), `${new Date().toISOString()} ${text}\n`).catch(() => {});
 
@@ -38,6 +42,8 @@ function openWindow() {
       preload: join(here, "preload.cjs"),
       contextIsolation: true,
       sandbox: true,
+      // 트레이로 숨어 있는 동안에도 알림 확인 타이머가 느려지지 않게 한다.
+      backgroundThrottling: false,
       additionalArguments: [`--chartdesk-version=${app.getVersion()}`],
     },
   });
@@ -51,10 +57,67 @@ function openWindow() {
     event.preventDefault();
     if (/^https?:\/\//.test(url)) shell.openExternal(url);
   });
+  window.on("close", (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    hideOrQuit();
+  });
   window.on("closed", () => {
     window = null;
   });
   window.loadURL(origin);
+}
+
+/** 화면에 저장된 알림 중 켜진 것이 있는지 본다. 읽지 못하면 없는 것으로 본다. */
+async function hasActiveAlerts() {
+  try {
+    return await window.webContents.executeJavaScript(
+      "(JSON.parse(localStorage.getItem('chartdesk.workspace.v1') ?? 'null')?.alerts ?? []).some((alert) => alert.active)",
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** 창을 닫을 때: 켜진 알림이 있으면 트레이로 숨기고, 없으면 끈다. */
+async function hideOrQuit() {
+  if (!(await hasActiveAlerts())) {
+    quit();
+    return;
+  }
+  showTray();
+  window?.hide();
+  if (!toldAboutTray && Notification.isSupported()) {
+    toldAboutTray = true;
+    new Notification({
+      title: "ChartDesk가 트레이에서 알림을 확인합니다",
+      body: "켜 둔 알림이 있어 창만 닫았습니다. 완전히 끄려면 작업 표시줄의 ChartDesk 아이콘 → 종료를 누르세요.",
+    }).show();
+  }
+}
+
+function showWindow() {
+  if (!window) return;
+  window.show();
+  if (window.isMinimized()) window.restore();
+  window.focus();
+}
+
+function quit() {
+  quitting = true;
+  app.quit();
+}
+
+function showTray() {
+  if (tray) return;
+  tray = new Tray(join(here, "icon.png"));
+  tray.setToolTip("ChartDesk · 알림 확인 중");
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "ChartDesk 열기", click: showWindow },
+    { type: "separator" },
+    { label: "종료 (알림 확인도 멈춤)", click: quit },
+  ]));
+  tray.on("click", showWindow);
 }
 
 async function checkForUpdates() {
@@ -110,7 +173,10 @@ function watchUpdates() {
       message: `새 버전 ${info.version}을 받았습니다.`,
       detail: `${releaseNotesText(info.releaseNotes)}지금 다시 시작하면 바로 적용됩니다. 나중을 고르면 앱을 끌 때 적용됩니다.`,
     });
-    if (response === 0) autoUpdater.quitAndInstall();
+    if (response === 0) {
+      quitting = true;
+      autoUpdater.quitAndInstall();
+    }
   });
   checkForUpdates();
   setInterval(checkForUpdates, CHECK_EVERY_MS).unref();
@@ -121,10 +187,9 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.setAppUserModelId("com.sunya0804.chartdesk");
   Menu.setApplicationMenu(null);
-  app.on("second-instance", () => {
-    if (!window) return;
-    if (window.isMinimized()) window.restore();
-    window.focus();
+  app.on("second-instance", showWindow);
+  app.on("before-quit", () => {
+    quitting = true;
   });
   ipcMain.handle("update-status", () => updateStatus);
   ipcMain.handle("check-updates", () => checkForUpdates());
