@@ -677,7 +677,8 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 @media (max-width: 900px) {
 	body { overflow: auto; }
 	.workspace { flex-wrap: wrap; min-height: auto; }
-	.grid { min-height: 70vh; flex-basis: calc(100% - 44px); }
+	/* 차트는 작도 도구 옆의 남은 폭을 채운다. 오른쪽 패널(.side)은 폭 100%라 다음 줄로 내려간다. */
+	.grid { min-height: 70vh; flex-basis: 0; }
 	.grid.layout-2, .grid.layout-4 { grid-template: none; grid-auto-rows: 60vh; }
 	.side { width: 100%; padding: 0 4px 4px; }
 	.ai-panel { width: 100% !important; }
