@@ -278,6 +278,19 @@
 		return { ...base, kind: 'price', price: alert.price, direction: alert.direction === 'below' ? 'below' : 'above' };
 	}
 
+	// 바 리플레이 모의 매매의 기본값. 시드는 원화 종목과 그 밖의 종목을 따로 기억한다.
+	const PAPER_DEFAULTS = { seedKrw: 10000000, seedUsd: 10000, fee: 0.05, leverage: 10, stop: 0, target: 0, size: 25 };
+
+	function sanitizePaper(saved) {
+		const out = { ...PAPER_DEFAULTS };
+		for (const key of Object.keys(PAPER_DEFAULTS)) {
+			const value = Number(saved?.[key]);
+			if (Number.isFinite(value) && value >= 0) out[key] = value;
+		}
+		out.leverage = Math.min(125, Math.max(1, out.leverage));
+		return out;
+	}
+
 	function sanitizeDrawings(saved) {
 		const out = {};
 		if (!saved || typeof saved !== 'object') return out;
@@ -316,6 +329,7 @@
 			toolPicks: {},
 			symbolMeta: {},
 			paneSizes: {},
+			paper: { ...PAPER_DEFAULTS },
 		};
 	}
 
@@ -358,6 +372,7 @@
 				toolPicks: saved.toolPicks && typeof saved.toolPicks === 'object' ? saved.toolPicks : {},
 				symbolMeta: saved.symbolMeta && typeof saved.symbolMeta === 'object' ? saved.symbolMeta : {},
 				// 가격 패널(main)과 하단 지표 패널(지표 id)의 높이 비율. 모든 종목·차트가 함께 쓴다.
+				paper: sanitizePaper(saved.paper),
 				paneSizes: Object.fromEntries(Object.entries(saved.paneSizes && typeof saved.paneSizes === 'object' ? saved.paneSizes : {})
 					.filter(([, size]) => Number.isFinite(size) && size > 0)),
 			};
@@ -2855,7 +2870,8 @@
 		startReplay(index, all = this.bars) {
 			this.closeSocket();
 			clearInterval(this.replay?.timer);
-			this.replay = { all, index, timer: 0, speed: this.replay?.speed ?? 2 };
+			this.replay = { all, index, timer: 0, speed: this.replay?.speed ?? 2, setup: true, account: null };
+			this.clearPaperMarks();
 			this.bars = all.slice(0, index + 1);
 			this.setAllData();
 			this.compares.forEach(compare => this.showCompare(compare));
@@ -2864,9 +2880,161 @@
 			this.renderReplayBar();
 		}
 
+		/** 모의 매매에서 금액의 단위. */
+		paperUnit() {
+			const symbol = this.cfg.symbol;
+			if (/KRW/.test(symbol) || symbol.endsWith('.KS') || symbol.endsWith('.KQ')) return '원';
+			const quote = /(USDT|USDC|FDUSD|BTC|ETH)(\.P)?$/.exec(symbolInfo(symbol).display)?.[1];
+			return quote ?? (PROV.resolve(symbol).provider.id === 'YAHOO' ? '달러' : 'USDT');
+		}
+
+		isFutures() {
+			const type = symbolInfo(this.cfg.symbol).type;
+			return type === 'perp' || type === 'futures';
+		}
+
+		/** 리플레이를 시작할 때 모의 매매 시드(선물이면 배율도)를 묻는다. */
+		renderPaperSetup() {
+			const paper = state.paper;
+			const krw = this.paperUnit() === '원';
+			const futures = this.isFutures();
+			const number = (value, label, props = {}) => {
+				const input = el('input', { type: 'number', step: 'any', min: '0', value: String(value), 'aria-label': label, ...props });
+				return input;
+			};
+			const seed = number(krw ? paper.seedKrw : paper.seedUsd, '시드', { class: 'paper-seed' });
+			const leverage = number(paper.leverage, '배율', { min: '1', max: '125', step: '1', class: 'paper-small' });
+			const fee = number(paper.fee, '수수료', { class: 'paper-small' });
+			const stop = number(paper.stop, '손절 %', { class: 'paper-small' });
+			const target = number(paper.target, '익절 %', { class: 'paper-small' });
+			const item = (label, input, unit) => el('label', { class: 'paper-field' }, el('span', { text: label }), input, unit ? el('small', { text: unit }) : '');
+			const start = () => {
+				const read = input => Math.max(0, Number(input.value) || 0);
+				const amount = read(seed);
+				if (amount <= 0) {
+					seed.focus();
+					return;
+				}
+				if (krw) paper.seedKrw = amount;
+				else paper.seedUsd = amount;
+				if (futures) paper.leverage = Math.min(125, Math.max(1, Math.round(read(leverage)) || 1));
+				paper.fee = read(fee);
+				paper.stop = read(stop);
+				paper.target = read(target);
+				save();
+				this.replay.account = new window.ChartDeskPaper.Account({ seed: amount, fee: paper.fee, leverage: paper.leverage, futures, stop: paper.stop, target: paper.target });
+				this.replay.setup = false;
+				this.renderReplayBar();
+			};
+			this.replayBar.replaceChildren(
+				el('div', { class: 'replay-row' }, el('b', { text: '모의 매매' }), el('span', { class: 'muted', text: `${ futures ? '선물 (롱·숏, 배율)' : '현물 (매수·매도)' } · 체결은 지금 봉의 종가` })),
+				el('div', { class: 'replay-row' },
+					item('시드', seed, this.paperUnit()),
+					futures ? item('배율', leverage, '배') : '',
+					item('수수료', fee, '%'),
+					item('손절', stop, '%'),
+					item('익절', target, '%')),
+				el('div', { class: 'replay-row' },
+					el('button', { class: 'primary', text: '모의 매매로 시작', onclick: start }),
+					el('button', { class: 'text-btn', text: '보기만', onclick: () => {
+						this.replay.setup = false;
+						this.renderReplayBar();
+					} }),
+					el('button', { class: 'text-btn', text: '✕', title: '리플레이 끝내기', onclick: () => this.endReplay(true) })),
+				el('p', { class: 'paper-note', text: '손절·익절은 진입가 대비 가격 변화 %입니다(0이면 쓰지 않음). 선물은 격리 증거금으로 계산하고, 청산가에 닿으면 증거금을 모두 잃습니다.' }));
+			this.replayBar.hidden = false;
+			// 휴대폰에서는 키보드가 차트를 가리지 않게 바로 입력칸을 잡지 않는다.
+			if (!matchMedia('(pointer: coarse)').matches) {
+				seed.focus();
+				seed.select();
+			}
+		}
+
+		/** 모의 매매 주문. side: 1 매수(롱), -1 매도(숏) */
+		paperOrder(side) {
+			const account = this.replay?.account;
+			const bar = this.bars[this.bars.length - 1];
+			if (!account || !bar) return;
+			try {
+				toast(account.order(side, state.paper.size / 100, bar.close, bar.time));
+			}
+			catch (error) {
+				toast(error.message);
+			}
+			this.showPaperMarks();
+			this.renderReplayBar();
+		}
+
+		paperClose(fraction) {
+			const account = this.replay?.account;
+			const bar = this.bars[this.bars.length - 1];
+			if (!account || !bar) return;
+			try {
+				toast(account.close(fraction, bar.close, bar.time));
+			}
+			catch (error) {
+				toast(error.message);
+			}
+			this.showPaperMarks();
+			this.renderReplayBar();
+		}
+
+		/** 체결 표시와 평단·청산가·손절·익절 선. */
+		showPaperMarks() {
+			const account = this.replay?.account;
+			this.clearPaperMarks();
+			if (!account) return;
+			const colors = cssColors();
+			const markers = account.fills.map(fill => (fill.kind === 'open'
+				? { time: fill.time, position: fill.side > 0 ? 'belowBar' : 'aboveBar', color: fill.side > 0 ? colors.up : colors.down, shape: fill.side > 0 ? 'arrowUp' : 'arrowDown', text: fill.side > 0 ? (account.futures ? '롱' : '매수') : '숏' }
+				: { time: fill.time, position: fill.side > 0 ? 'belowBar' : 'aboveBar', color: fill.pnl >= 0 ? colors.up : colors.down, shape: 'circle', text: `${ fill.reason } ${ fill.ret >= 0 ? '+' : '' }${ (fill.ret * 100).toFixed(1) }%` }));
+			if (markers.length) this.showTrades(markers.sort((a, b) => a.time - b.time));
+			const position = account.position;
+			if (!position) return;
+			const line = (price, color, title, style = LC.LineStyle.Dashed) => price && this.main.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title });
+			this.paperLines = [
+				line(position.entry, colors.text, `평단 ${ position.side > 0 ? (account.futures ? '롱' : '매수') : '숏' }`, LC.LineStyle.Solid),
+				line(account.liquidation(), colors.warn, '청산가'),
+				line(position.stopPrice, colors.down, '손절'),
+				line(position.targetPrice, colors.up, '익절'),
+			].filter(Boolean);
+		}
+
+		clearPaperMarks() {
+			for (const line of this.paperLines ?? []) this.main.removePriceLine(line);
+			this.paperLines = [];
+			this.clearTrades();
+		}
+
+		/** 모의 매매 상태 줄: 자산, 수익률, 포지션. */
+		paperStatus() {
+			const account = this.replay.account;
+			const bar = this.bars[this.bars.length - 1];
+			const unit = this.paperUnit();
+			const money = value => `${ value.toLocaleString('ko-KR', { maximumFractionDigits: unit === '원' ? 0 : 2 }) } ${ unit }`;
+			const sum = account.summary(bar.close);
+			const parts = [`자산 ${ money(sum.equity) } (${ formatPercent(sum.ret * 100) })`];
+			const position = account.position;
+			if (position) {
+				const pnl = account.unrealized(bar.close);
+				const name = position.side > 0 ? (account.futures ? '롱' : '보유') : '숏';
+				parts.push(`${ name } ${ window.ChartDeskPaper.formatQty(position.qty) } @ ${ formatPrice(position.entry, this.precision) }${ account.futures ? ` ×${ account.leverage }` : '' }`,
+					`평가 ${ pnl > 0 ? '+' : pnl < 0 ? '-' : '' }${ money(Math.abs(pnl)) } (${ formatPercent((pnl / position.margin * 100) || 0) })`);
+				const liq = account.liquidation();
+				if (liq) parts.push(`청산가 ${ formatPrice(liq, this.precision) }`);
+			}
+			else parts.push(`현금 ${ money(account.cash) }`);
+			if (sum.trades) parts.push(`거래 ${ sum.trades }회 · 승률 ${ (sum.winRate * 100).toFixed(0) }%`);
+			return parts.join(' · ');
+		}
+
 		renderReplayBar() {
 			const replay = this.replay;
 			if (!replay) return;
+			if (replay.setup) {
+				this.renderPaperSetup();
+				return;
+			}
 			const playing = replay.timer !== 0;
 			const speeds = [1, 2, 5, 10, 30];
 			const button = (text, title, onClick) => el('button', { class: 'text-btn', text, title, onclick: onClick });
@@ -2875,12 +3043,32 @@
 				if (replay.timer) this.playReplay(true);
 			});
 			const time = this.bars[this.bars.length - 1]?.time;
-			this.replayBar.replaceChildren(
+			const rows = [];
+			const account = replay.account;
+			if (account) {
+				const futures = account.futures;
+				const size = selectInput(state.paper.size, [10, 25, 50, 100].map(value => [value, `${ value }%`]), (value) => {
+					state.paper.size = Number(value);
+					save();
+				});
+				size.title = '주문 크기: 쓸 수 있는 현금 중 넣을 비율 (반대 주문은 포지션 중 정리할 비율)';
+				rows.push(
+					el('div', { class: 'replay-row' },
+						el('button', { class: 'paper-buy', text: futures ? '롱 ▲' : '매수 ▲', title: '지금 봉 종가로 매수', onclick: () => this.paperOrder(1) }),
+						el('button', { class: 'paper-sell', text: futures ? '숏 ▼' : '매도 ▼', title: futures ? '지금 봉 종가로 숏 (롱이 있으면 그만큼 정리)' : '보유분을 지금 봉 종가로 매도', onclick: () => this.paperOrder(-1) }),
+						size,
+						button('½ 청산', '포지션 절반 정리', () => this.paperClose(0.5)),
+						button('전체 청산', '포지션 모두 정리', () => this.paperClose(1))),
+					el('div', { class: 'replay-row paper-status', text: this.paperStatus() }));
+			}
+			this.replayBar.replaceChildren(el('div', { class: 'replay-row' },
 				el('b', { text: '리플레이' }),
 				button('⟲', '다른 시작 봉 고르기', () => {
 					clearInterval(replay.timer);
 					replay.timer = 0;
 					const all = replay.all;
+					this.announcePaper();
+					this.clearPaperMarks();
 					this.bars = all;
 					this.setAllData();
 					this.replay = null;
@@ -2891,7 +3079,7 @@
 				button('⏭', '한 봉 앞으로', () => this.stepReplay()),
 				speed,
 				el('span', { class: 'replay-pos', text: `${ time === undefined ? '' : new Date((time - TZ_OFFSET) * 1000).toLocaleString('ko-KR', { year: '2-digit', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) } · 남은 봉 ${ replay.all.length - 1 - replay.index }` }),
-				button('✕', '리플레이 끝내기', () => this.endReplay(true)));
+				button('✕', '리플레이 끝내기', () => this.endReplay(true))), ...rows);
 			this.replayBar.hidden = false;
 		}
 
@@ -2909,10 +3097,20 @@
 			if (replay.index >= replay.all.length - 1) {
 				this.playReplay(false);
 				toast('리플레이: 마지막 봉까지 봤습니다.');
+				this.announcePaper();
 				return;
 			}
 			replay.index++;
-			this.bars.push(replay.all[replay.index]);
+			const bar = replay.all[replay.index];
+			this.bars.push(bar);
+			if (replay.account) {
+				const event = replay.account.onBar(bar);
+				if (event) {
+					toast(event);
+					this.playReplay(false);
+				}
+				this.showPaperMarks();
+			}
 			const data = this.mainData();
 			this.main.update(data[data.length - 1]);
 			this.updateIndicatorTail();
@@ -2925,8 +3123,21 @@
 		}
 
 		/** 리플레이를 끝낸다. reload면 최신 봉을 다시 받고 실시간으로 돌아간다. */
+		/** 모의 매매 결과를 알린다. */
+		announcePaper() {
+			const account = this.replay?.account;
+			const bar = this.bars[this.bars.length - 1];
+			if (!account || !bar || (account.trades.length === 0 && !account.position)) return;
+			const unit = this.paperUnit();
+			const money = value => `${ value.toLocaleString('ko-KR', { maximumFractionDigits: unit === '원' ? 0 : 2 }) } ${ unit }`;
+			const sum = account.summary(bar.close);
+			toast(`모의 매매 결과: ${ money(account.seed) } → ${ money(sum.equity) } (${ formatPercent(sum.ret * 100) }) · 거래 ${ sum.trades }회 · 승률 ${ (sum.winRate * 100).toFixed(0) }%${ account.position ? ' · 열린 포지션은 마지막 종가로 평가' : '' }`);
+		}
+
 		endReplay(reload = false) {
 			const wasActive = this.replay !== null || this.picking;
+			if (this.replay?.account && reload) this.announcePaper();
+			if (this.replay) this.clearPaperMarks();
 			if (this.replay) clearInterval(this.replay.timer);
 			this.replay = null;
 			this.picking = false;
