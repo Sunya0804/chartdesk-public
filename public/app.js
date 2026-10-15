@@ -1950,6 +1950,7 @@
 				this.sessionButton,
 				this.logButton,
 				this.autoButton);
+			this.foot = foot;
 
 			this.root = el('div', { class: 'pane' },
 				el('div', { class: 'pane-head' },
@@ -2870,10 +2871,10 @@
 			this.picking = true;
 			this.body.classList.add('picking');
 			this.replayButton.classList.add('on');
-			this.replayBar.replaceChildren(
+			this.replayBar.replaceChildren(el('div', { class: 'replay-row' },
 				this.replayGrip('리플레이'),
 				el('span', { text: '시작할 봉을 차트에서 누르세요' }),
-				el('button', { class: 'text-btn', text: '취소 (Esc)', onclick: () => this.endReplay(true) }));
+				el('button', { class: 'text-btn', text: '취소 (Esc)', onclick: () => this.endReplay(true) })));
 			this.replayBar.hidden = false;
 			this.placeReplayBar();
 		}
@@ -2902,7 +2903,7 @@
 
 		/** 리플레이 막대의 손잡이. 끌어서 옮기고, 두 번 누르면 아래 가운데로 돌아간다. */
 		replayGrip(label) {
-			const grip = el('b', { class: 'replay-grip', title: '끌어서 옮기기 · 두 번 누르면 제자리', text: `⠿ ${ label }` });
+			const grip = el('b', { class: 'replay-grip', title: '끌어서 옮기기 · 두 번 누르면 제자리' }, el('span', { class: 'grip-dots', text: '⠿ ' }), label);
 			grip.addEventListener('pointerdown', event => this.dragReplayBar(event));
 			grip.addEventListener('dblclick', () => {
 				state.replayPos = null;
@@ -2912,12 +2913,27 @@
 			return grip;
 		}
 
-		/** 저장된 자리에 막대를 놓는다. 좁은 화면(휴대폰)은 폭을 다 쓰고 위아래만 옮긴다. */
+		/**
+		 * 막대를 놓는다. PC는 차트 위에 떠서 저장된 자리로 옮기고,
+		 * 휴대폰은 차트 바로 아래(기간 버튼 줄 위)에 붙여 차트를 가리지 않는다.
+		 */
 		placeReplayBar() {
 			const bar = this.replayBar;
 			const pos = state.replayPos;
 			// 휴대폰 화면 규칙(styles.css의 max-width: 600px)과 같은 기준을 쓴다.
 			const narrow = matchMedia('(max-width: 600px)').matches;
+			const home = narrow ? this.root : this.body;
+			if (bar.parentElement !== home) {
+				if (narrow) this.root.insertBefore(bar, this.foot);
+				else this.body.append(bar);
+			}
+			this.root.classList.toggle('replaying', !bar.hidden);
+			bar.classList.toggle('docked', narrow);
+			if (narrow) {
+				for (const key of ['left', 'top', 'right', 'bottom', 'width', 'transform']) bar.style[key] = '';
+				bar.classList.remove('moved');
+				return;
+			}
 			bar.classList.toggle('moved', pos !== null);
 			if (!pos) {
 				for (const key of ['left', 'top', 'right', 'bottom', 'width', 'transform']) bar.style[key] = '';
@@ -2929,19 +2945,14 @@
 			bar.style.top = `${ top }px`;
 			bar.style.bottom = 'auto';
 			bar.style.transform = 'none';
-			if (narrow) {
-				bar.style.left = '';
-				bar.style.right = '';
-				bar.style.width = '';
-				return;
-			}
 			bar.style.right = 'auto';
 			bar.style.width = 'max-content';
 			bar.style.left = `${ Math.min(Math.max(0, pos.x * width), Math.max(0, width - bar.offsetWidth)) }px`;
 		}
 
 		dragReplayBar(event) {
-			if (event.button !== 0) return;
+			// 휴대폰에서는 차트 아래에 붙어 있어 옮기지 않는다.
+			if (event.button !== 0 || this.replayBar.classList.contains('docked')) return;
 			event.preventDefault();
 			const bar = this.replayBar;
 			const box = this.body.getBoundingClientRect();
@@ -3379,6 +3390,7 @@
 			this.picking = false;
 			this.body.classList.remove('picking');
 			this.replayBar.hidden = true;
+			this.root.classList.remove('replaying');
 			this.replayButton.classList.remove('on');
 			if (reload && wasActive) this.load();
 		}

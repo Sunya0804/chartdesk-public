@@ -1041,3 +1041,25 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 /* 차트 라이브러리의 지표 칸 경계(높이 조절, z-index 50)보다 위에 둔다. 아래에 깔리면 겹친 곳의 클릭·터치를 경계가 가져간다. */
 .replay-bar { z-index: 60; }
 .price-plus { z-index: 55; }
+
+/* 휴대폰: 리플레이·모의 매매 창은 차트 바로 아래에 붙인다. 리플레이 중에는 차트 영역을 늘려 둘이 한 화면에 들어오게 한다. */
+@media (max-width: 600px) {
+	.pane > .replay-bar.docked {
+		position: static;
+		transform: none;
+		width: auto;
+		max-width: none;
+		margin: 0;
+		border-width: 1px 0 0;
+		border-radius: 0;
+		box-shadow: none;
+		flex: none;
+	}
+	.replay-bar.docked .replay-grip { cursor: default; }
+	.replay-bar.docked .replay-grip:hover { background: none; }
+	.grid:has(.pane.replaying) { height: auto; }
+	.pane.replaying .pane-body { flex: none; height: 46vh; }
+}
+@media (max-width: 600px) {
+	.replay-bar.docked .grip-dots { display: none; }
+}
