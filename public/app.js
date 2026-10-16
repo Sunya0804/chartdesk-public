@@ -1144,12 +1144,19 @@
 		const year = new Date().getFullYear();
 		const yearStart = new Date(year, 0, 1).getTime() / 1000 + TZ_OFFSET;
 		const lastOfYear = barIndexAt(daily, yearStart - 1);
+		// 일봉이 올해 안쪽까지만 있으면(Upbit은 200일) 월봉의 지난해 12월 종가로 대신한다.
+		// 월봉 시각은 거래소 현지 1일 0시라 반나절 더해 그 달로 읽는다.
+		const december = monthly.find((bar) => {
+			const date = new Date((bar.time - TZ_OFFSET + 43200) * 1000);
+			return date.getUTCFullYear() === year - 1 && date.getUTCMonth() === 11;
+		});
+		const yearReference = lastOfYear >= 0 && lastOfYear < daily.length - 1 ? daily[lastOfYear].close : december?.close ?? null;
 		const periods = [
 			['1주', change(before(7))],
 			['1개월', change(before(30))],
 			['3개월', change(before(91))],
 			['6개월', change(before(182))],
-			['연초 이후', change(lastOfYear >= 0 ? daily[lastOfYear].close : null)],
+			['연초 이후', change(yearReference)],
 			['1년', change(before(365))],
 			['3년', change(before(1095))],
 		];
@@ -1431,9 +1438,9 @@
 		}
 		const ordered = [...state.alerts].sort((a, b) => Number(b.active) - Number(a.active));
 		list.replaceChildren(...ordered.map((alert) => {
-			const waiting = alert.kind === 'price' ? (alert.direction === 'above' ? '이상 대기' : '이하 대기') : '대기';
+			// 가격 알림의 이상·이하는 alertText에 이미 들어 있어 상태 칸은 '대기'만 적는다.
 			const status = alert.active
-				? `${ waiting }${ alert.repeat && alert.triggeredAt ? ` · 최근 ${ new Date(alert.triggeredAt).toLocaleTimeString('ko-KR') }` : '' }`
+				? `대기${ alert.repeat && alert.triggeredAt ? ` · 최근 ${ new Date(alert.triggeredAt).toLocaleTimeString('ko-KR') }` : '' }`
 				: `도달 ${ new Date(alert.triggeredAt).toLocaleTimeString('ko-KR') }`;
 			const remove = el('button', {
 				class: 'x',

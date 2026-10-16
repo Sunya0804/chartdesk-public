@@ -505,7 +505,9 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 .panel.collapsed { flex: none; }
 .panel.collapsed > :not(h2) { display: none; }
 .panel.collapsed h2 { border-bottom: 0; }
-.panel-toggle { display: flex; align-items: center; gap: 6px; flex: 1; align-self: stretch; text-align: left; padding: 0; }
+/* 기본 button은 가운데 정렬이라, 제목은 왼쪽에 붙이고 h2의 글자 모양을 그대로 쓴다. */
+.panel-toggle { display: flex; align-items: center; justify-content: flex-start; gap: 6px; flex: 1; align-self: stretch; text-align: left; padding: 0; border: 0; border-radius: 0; font-weight: inherit; color: inherit; }
+.panel-toggle:hover { background: none; color: var(--text); }
 .panel-chevron { width: 10px; }
 .cond-alerts { order: 1; pointer-events: auto; color: var(--warn); padding: 0 4px; }
 
