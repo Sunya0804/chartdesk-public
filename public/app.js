@@ -125,6 +125,7 @@
 		magnet: '<path d="M5 4v6a5 5 0 0010 0V4h-3v6a2 2 0 01-4 0V4z"/>',
 		eye: '<path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.4"/>',
 		eyeOff: '<path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5z"/><path d="M4 16L16 4"/>',
+		refresh: '<path d="M16 7a6.5 6.5 0 1 0 .4 5M16 3v4h-4"/>',
 		undo: '<path d="M7 5L3 9l4 4M3 9h9a4 4 0 010 8h-2"/>',
 		redo: '<path d="M13 5l4 4-4 4M17 9H8a4 4 0 000 8h2"/>',
 		trash: '<path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10"/>',
@@ -331,6 +332,7 @@
 				'YAHOO:^KS11', 'YAHOO:005930.KS', 'YAHOO:^GSPC', 'YAHOO:NVDA', 'YAHOO:KRW=X', 'YAHOO:GC=F',
 			],
 			alerts: [],
+			collapsed: { perf: false, news: false, watchlist: false, alerts: false },
 			drawings: {},
 			drawingDefaults: {},
 			toolPicks: {},
@@ -375,6 +377,7 @@
 					? saved.watchlist.filter(s => typeof s === 'string').map(normalizeId).filter(id => PROV.resolve(id))
 					: base.watchlist,
 				alerts: Array.isArray(saved.alerts) ? saved.alerts.map(sanitizeAlert).filter(Boolean) : [],
+				collapsed: Object.fromEntries(Object.keys(base.collapsed).map(key => [key, saved.collapsed?.[key] === true])),
 				drawings: sanitizeDrawings(saved.drawings),
 				drawingDefaults: saved.drawingDefaults && typeof saved.drawingDefaults === 'object' ? saved.drawingDefaults : {},
 				toolPicks: saved.toolPicks && typeof saved.toolPicks === 'object' ? saved.toolPicks : {},
@@ -986,10 +989,19 @@
 		},
 
 		async poll(provider, poll) {
-			if (poll.busy || poll.codes.length === 0 || document.hidden) return;
+			if (poll.busy || poll.codes.length === 0) return;
+			let codes = poll.codes;
+			const now = Date.now();
+			if (document.hidden) {
+				// 화면이 안 보이면 켜진 가격·작도 알림에 필요한 시세만 느리게 받는다.
+				const symbols = new Set(state.alerts.filter(alert => alert.active && (alert.kind === 'price' || alert.kind === 'drawing')).map(alert => alert.symbol));
+				codes = codes.filter(code => symbols.has(`${ provider.id }:${ code }`));
+				if (codes.length === 0 || now - (poll.lastAt ?? -Infinity) < Math.max(provider.quoteMs * 2, 10000)) return;
+			}
+			poll.lastAt = now;
 			poll.busy = true;
 			try {
-				for (const [code, quote] of await provider.quotes(poll.codes)) this.onQuote(`${ provider.id }:${ code }`, quote);
+				for (const [code, quote] of await provider.quotes(codes)) this.onQuote(`${ provider.id }:${ code }`, quote);
 			}
 			catch {
 				// 다음 주기에 다시 시도한다.
@@ -1041,6 +1053,27 @@
 	const sideData = new Map();
 	const SIDE_FRESH_MS = 10 * 60 * 1000;
 	let sideNewsShown = null;
+	let performanceShown = null;
+
+	function renderPanelCollapse() {
+		for (const panel of document.querySelectorAll('.side [data-panel]')) {
+			const collapsed = state.collapsed[panel.dataset.panel];
+			panel.classList.toggle('collapsed', collapsed);
+			panel.querySelector('.panel-toggle').setAttribute('aria-expanded', String(!collapsed));
+			panel.querySelector('.panel-chevron').textContent = collapsed ? '▸' : '▾';
+		}
+	}
+
+	for (const panel of document.querySelectorAll('.side [data-panel]')) {
+		panel.querySelector('h2').addEventListener('click', (event) => {
+			if (event.target.closest('button:not(.panel-toggle)')) return;
+			const key = panel.dataset.panel;
+			state.collapsed[key] = !state.collapsed[key];
+			renderPanelCollapse();
+			save();
+		});
+	}
+	renderPanelCollapse();
 
 	function sideEntry(id) {
 		let entry = sideData.get(id);
@@ -1083,6 +1116,11 @@
 
 	/** 기간별(1주~3년, 연초 이후)과 최근 12개월 수익률. */
 	function renderPerformance(id, entry) {
+		const nowMs = Date.now();
+		// 시세만 바뀌면 1초에 한 번, 종목이나 받은 데이터가 바뀌면 바로 그린다.
+		if (performanceShown?.id === id && performanceShown.daily === entry.daily && performanceShown.monthly === entry.monthly
+			&& performanceShown.loading === entry.loading && nowMs - performanceShown.at < 1000) return;
+		performanceShown = { id, daily: entry.daily, monthly: entry.monthly, loading: entry.loading, at: nowMs };
 		const box = $('perf');
 		const daily = entry.daily;
 		if (!daily?.length) {
@@ -1160,7 +1198,7 @@
 			el('small', { text: `${ item.publisher ? `${ item.publisher } · ` : '' }${ ago(item.time) }` }))));
 	}
 
-	$('news-refresh').append(icon('undo'));
+	$('news-refresh').append(icon('refresh'));
 	$('news-refresh').addEventListener('click', () => {
 		const id = activePane()?.cfg.symbol;
 		if (!id) return;
@@ -2050,7 +2088,15 @@
 			};
 			this.cells = { open: cell('시'), high: cell('고'), low: cell('저'), close: cell('종'), change: el('b') };
 			ohlc.append(this.cells.change);
-			this.legend = el('div', { class: 'legend' }, ohlc);
+			this.conditionAlerts = el('button', { class: 'legend-row cond-alerts', hidden: '', title: '오른쪽 알림 패널 보기', onclick: () => {
+				state.collapsed.alerts = false;
+				renderPanelCollapse();
+				save();
+				const heading = $('alerts-panel').querySelector('.panel-toggle');
+				heading.focus({ preventScroll: true });
+				$('alerts-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+			} });
+			this.legend = el('div', { class: 'legend' }, ohlc, this.conditionAlerts);
 			this.status = el('div', { class: 'status' });
 			this.chartHost = el('div', { class: 'chart' });
 			this.drawBar = el('div', { class: 'draw-bar', hidden: '' });
@@ -2072,6 +2118,7 @@
 			this.body.append(this.zoomOutButton);
 			this.zoomStack = [];
 			this.replayButton = el('button', { class: 'foot-btn', title: '바 리플레이: 고른 봉부터 한 봉씩 다시 보여 줍니다', text: '리플레이', onclick: () => this.toggleReplay() });
+			this.clearTradesButton = el('button', { class: 'foot-btn', text: '거래 표시 지우기', hidden: '', onclick: () => this.clearTrades() });
 			this.replayBar = el('div', { class: 'replay-bar', hidden: '' });
 			this.plusButton = el('button', { class: 'price-plus', hidden: '', title: '이 가격에 지정가 주문(리플레이 모의 매매) 또는 알림', text: '+' });
 			this.plusButton.addEventListener('click', () => this.openPlusMenu());
@@ -2081,6 +2128,7 @@
 					el('button', { class: 'foot-btn', text: label, onclick: () => this.setRange(interval, count) })),
 				el('span', { class: 'spacer' }),
 				this.replayButton,
+				this.clearTradesButton,
 				this.clock,
 				this.sessionButton,
 				this.logButton,
@@ -2846,6 +2894,19 @@
 					axisLabelVisible: true,
 					title: '알림',
 				}));
+			const count = state.alerts.filter(alert => alert.active && alert.kind === 'cond' && alert.symbol === this.cfg.symbol).length;
+			this.conditionAlerts.hidden = count === 0;
+			this.conditionAlerts.textContent = `🔔 조건 알림 ${ count }개`;
+			this.syncDrawingAlert();
+		}
+
+		syncDrawingAlert() {
+			const bell = this.drawBar.querySelector('[data-drawing-alert]');
+			if (!bell) return;
+			const on = state.alerts.some(alert => alert.active && alert.kind === 'drawing' && alert.symbol === this.cfg.symbol && alert.drawingId === bell.dataset.drawingAlert);
+			bell.classList.toggle('on', on);
+			bell.setAttribute('aria-pressed', String(on));
+			bell.title = on ? '이 선에 알림이 설정되어 있습니다 · 알림 추가' : '이 선에 알림: 가격이 넘으면 알립니다';
 		}
 
 		showCrosshairAt(time) {
@@ -2891,13 +2952,14 @@
 			}
 			if (fields.length) nodes.push(iconButton('gear', '설정', { onclick: () => openDrawingSettings(this, drawing) }));
 			if (ALERTABLE_DRAWINGS.has(drawing.type)) {
-				const bell = iconButton('bell', '이 선에 알림: 가격이 넘으면 알립니다');
+				const bell = iconButton('bell', '이 선에 알림: 가격이 넘으면 알립니다', { 'data-drawing-alert': drawing.id });
 				bell.addEventListener('click', () => openAlertEditor(bell, this, 'drawing', drawing.id));
 				nodes.push(bell);
 			}
 			nodes.push(iconButton('trash', '삭제 (Delete)', { onclick: () => removeSelectedDrawing() }));
 			this.drawBar.replaceChildren(...nodes);
 			this.drawBar.hidden = false;
+			this.syncDrawingAlert();
 		}
 
 		// ----- 종목 비교 -----
@@ -3398,8 +3460,8 @@
 					this.replayBar.hidden = true;
 					this.toggleReplay();
 				}),
-				button(playing ? '⏸' : '▶', playing ? '멈춤' : '재생', () => this.playReplay(!playing)),
-				button('⏭', '한 봉 앞으로', () => this.stepReplay()),
+				button(playing ? '⏸' : '▶', playing ? '멈춤 (Space)' : '재생 (Space)', () => this.playReplay(!playing)),
+				button('⏭', '한 봉 앞으로 (→)', () => this.stepReplay()),
 				speed,
 				this.replayRefs.pos,
 				button('✕', '리플레이 끝내기', () => this.endReplay(true))), ...rows);
@@ -3534,12 +3596,15 @@
 
 		showTrades(markers) {
 			this.clearTrades();
+			if (!markers.length) return;
 			this.markers = LC.createSeriesMarkers(this.main, markers);
+			this.clearTradesButton.hidden = !!this.replay?.account;
 		}
 
 		clearTrades() {
 			this.markers?.detach();
 			this.markers = null;
+			this.clearTradesButton.hidden = true;
 		}
 
 		/** 백테스트가 받아 온 과거 봉을 앞에 붙인다. */
@@ -4400,7 +4465,7 @@
 	}
 
 	document.addEventListener('keydown', (event) => {
-		const typing = event.target instanceof HTMLElement && event.target.matches('input, textarea, select');
+		const typing = event.target instanceof HTMLElement && (event.target.matches('input, textarea, select') || event.target.isContentEditable);
 		if (event.key === 'Escape') {
 			const picking = panes.find(pane => pane.picking);
 			if (picking) picking.endReplay(true);
@@ -4415,6 +4480,13 @@
 			return;
 		}
 		if (typing) return;
+		const pane = activePane();
+		if (pane?.replay && !pane.replay.setup && (event.code === 'Space' || event.key === ' ' || event.key === 'ArrowRight')) {
+			event.preventDefault();
+			if (event.key === 'ArrowRight') pane.stepReplay();
+			else if (!event.repeat) pane.playReplay(pane.replay.timer === 0);
+			return;
+		}
 		const key = event.key.toLowerCase();
 		if (event.key === 'Enter' && panes.some(pane => pane.layer.finish())) {
 			event.preventDefault();

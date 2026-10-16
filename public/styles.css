@@ -502,6 +502,12 @@ input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 3px; }
 }
 
 .panel.grow { flex: 1; }
+.panel.collapsed { flex: none; }
+.panel.collapsed > :not(h2) { display: none; }
+.panel.collapsed h2 { border-bottom: 0; }
+.panel-toggle { display: flex; align-items: center; gap: 6px; flex: 1; align-self: stretch; text-align: left; padding: 0; }
+.panel-chevron { width: 10px; }
+.cond-alerts { order: 1; pointer-events: auto; color: var(--warn); padding: 0 4px; }
 
 .panel h2 {
 	display: flex;
