@@ -15,6 +15,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.AtomicFile;
 import android.util.Base64;
 import android.view.View;
 import android.view.WindowInsets;
@@ -30,10 +31,14 @@ import android.window.OnBackInvokedDispatcher;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 
 /** 앱 화면. 앱 안의 로컬 서버가 내주는 데스크톱과 같은 화면을 웹뷰로 띄운다. */
@@ -56,10 +61,16 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable watchTick = () -> {
         syncAlertService();
+        backupSettings();
         handler.postDelayed(this.watchTick, WATCH_EVERY_MS);
     };
     private boolean watching;
     private boolean visible;
+    // 설정 백업(android-bridge.js). 웹뷰 저장소는 포트마다 따로라서, 서버가 지난번과 다른 포트로 뜨면 이 백업으로 되돌린다.
+    private static final String SETTINGS_BACKUP = "settings-backup.json";
+    private int port;
+    private boolean restoreChecked;
+    private String lastBackup;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -69,7 +80,6 @@ public class MainActivity extends Activity {
         new SecureRandom().nextBytes(random);
         String token = Base64.encodeToString(random, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
         server = new LocalServer(this, token);
-        int port;
         try {
             port = server.start();
         } catch (IOException error) {
@@ -170,8 +180,41 @@ public class MainActivity extends Activity {
     protected void onPause() {
         // 화면이 아직 앞에 있을 때 마지막으로 확인한다(뒤로 간 앱은 포그라운드 서비스를 새로 시작할 수 없다).
         syncAlertService();
+        backupSettings();
         visible = false;
         super.onPause();
+    }
+
+    /** 화면에 지금 설정을 백업하게 한다(android-bridge.js의 __chartdeskBackup). */
+    private void backupSettings() {
+        if (web != null) web.evaluateJavascript("window.__chartdeskBackup && window.__chartdeskBackup()", null);
+    }
+
+    private AtomicFile backupFile() {
+        return new AtomicFile(new File(getFilesDir(), SETTINGS_BACKUP));
+    }
+
+    /** 백업한 설정과 그때의 포트. 없거나 깨졌으면 null. */
+    private JSONObject readBackup() {
+        try {
+            return new JSONObject(new String(backupFile().readFully(), StandardCharsets.UTF_8));
+        } catch (IOException | JSONException missing) {
+            return null;
+        }
+    }
+
+    private void writeBackup(String storage) {
+        AtomicFile file = backupFile();
+        FileOutputStream out = null;
+        try {
+            byte[] bytes = new JSONObject().put("port", port).put("storage", storage).toString().getBytes(StandardCharsets.UTF_8);
+            out = file.startWrite();
+            out.write(bytes);
+            file.finishWrite(out);
+            lastBackup = storage;
+        } catch (IOException | JSONException error) {
+            if (out != null) file.failWrite(out);
+        }
     }
 
     /** 화면에 켜진 알림이 있는지 보고 AlertService를 켜거나 끈다. */
@@ -285,6 +328,28 @@ public class MainActivity extends Activity {
                     .setType(type.isEmpty() ? "application/octet-stream" : type).putExtra(Intent.EXTRA_TITLE, name);
                 startActivityForResult(intent, SAVE_FILE);
             });
+        }
+
+        /** 화면 스크립트보다 먼저 불린다. 지난번과 포트가 다르면 백업한 설정(키→값 JSON)을, 아니면 빈 문자열을 준다. 앱을 켠 뒤 한 번만 준다. */
+        @JavascriptInterface
+        public String restoreSettings() {
+            synchronized (MainActivity.this) {
+                if (restoreChecked) return "";
+                restoreChecked = true;
+                JSONObject backup = readBackup();
+                if (backup == null || backup.optInt("port") == port) return "";
+                String storage = backup.optString("storage");
+                // 이제 이 포트의 저장소에 같은 설정이 들어가므로 다음 실행에서 다시 되돌리지 않게 포트를 바꿔 둔다.
+                writeBackup(storage);
+                return storage;
+            }
+        }
+
+        @JavascriptInterface
+        public void backupSettings(String storage) {
+            synchronized (MainActivity.this) {
+                if (!storage.equals(lastBackup)) writeBackup(storage);
+            }
         }
 
         @JavascriptInterface

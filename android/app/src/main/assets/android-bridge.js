@@ -54,4 +54,43 @@
 		}
 	}
 	window.Notification = AppNotification;
+
+	// 웹뷰의 저장소(localStorage)는 포트마다 따로다. 앱 서버가 47380을 못 쓰고 다른 포트로 뜨면 설정이 비어 보이므로,
+	// 설정('chartdesk'로 시작하는 값)을 앱 안에 따로 백업해 두고 포트가 바뀐 첫 실행에서 화면 스크립트보다 먼저 되돌린다.
+	const PREFIX = 'chartdesk';
+	try {
+		const restore = native.restoreSettings();
+		if (restore) {
+			const entries = JSON.parse(restore);
+			for (let i = localStorage.length - 1; i >= 0; i--) {
+				const key = localStorage.key(i);
+				if (key.startsWith(PREFIX) && !(key in entries)) localStorage.removeItem(key);
+			}
+			for (const [key, value] of Object.entries(entries)) localStorage.setItem(key, value);
+		}
+	}
+	catch {
+		// 되돌리지 못하면 이 포트의 저장소를 그대로 쓴다.
+	}
+
+	window.__chartdeskBackup = () => {
+		try {
+			const entries = {};
+			for (let i = 0; i < localStorage.length; i++) {
+				const key = localStorage.key(i);
+				if (key.startsWith(PREFIX)) entries[key] = localStorage.getItem(key);
+			}
+			// 화면을 아직 한 번도 저장하지 않았으면(빈 저장소) 이전 백업을 덮지 않는다.
+			if ('chartdesk.workspace.v1' in entries) native.backupSettings(JSON.stringify(entries));
+		}
+		catch {
+			// 백업하지 못해도 다음 기회에 다시 한다.
+		}
+	};
+	// 화면의 저장(app.js)이 먼저 끝나도록 한 박자 늦게 백업한다.
+	const later = () => setTimeout(window.__chartdeskBackup, 0);
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') later();
+	});
+	window.addEventListener('pagehide', window.__chartdeskBackup);
 })();

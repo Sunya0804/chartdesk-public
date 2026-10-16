@@ -405,19 +405,30 @@
 	// 저장할 때마다 부른다(Gist 자동 동기화).
 	let onSave = null;
 
+	function flushSave() {
+		clearTimeout(saveTimer);
+		saveTimer = 0;
+		if (savingFrozen) return;
+		try {
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+		}
+		catch {
+			// 저장소를 쓸 수 없어도 화면은 계속 동작한다.
+		}
+	}
+
 	function save() {
 		clearTimeout(saveTimer);
 		if (savingFrozen) return;
 		onSave?.();
-		saveTimer = setTimeout(() => {
-			try {
-				localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-			}
-			catch {
-				// 저장소를 쓸 수 없어도 화면은 계속 동작한다.
-			}
-		}, 200);
+		saveTimer = setTimeout(flushSave, 200);
 	}
+
+	// 앱을 숨길 때 백업 쪽에서 읽기 전에 마지막 변경을 저장한다.
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') flushSave();
+	});
+	window.addEventListener('pagehide', flushSave);
 
 	const activeTab = () => state.tabs.find(tab => tab.id === state.activeTab);
 

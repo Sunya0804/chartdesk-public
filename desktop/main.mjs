@@ -1,6 +1,6 @@
 // 데스크톱 앱. server.mjs를 이 프로세스 안에서 띄우고 그 주소를 창에 연다.
 // 새 버전은 GitHub Releases(Sunya0804/chartdesk-public)에서 받는다.
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, session, shell, Tray } from "electron";
 import electronUpdater from "electron-updater";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -62,6 +62,12 @@ function openWindow() {
     event.preventDefault();
     hideOrQuit();
   });
+  // Windows를 끄거나 로그아웃할 때는 트레이로 숨기지 않고 그대로 끈다. 닫기를 막으면 Windows 종료가 멈춘다.
+  const endSession = () => {
+    quitting = true;
+  };
+  window.on("query-session-end", endSession);
+  window.on("session-end", endSession);
   window.on("closed", () => {
     window = null;
   });
@@ -205,6 +211,9 @@ if (!app.requestSingleInstanceLock()) {
       app.quit();
       return;
     }
+    // 창은 프록시 없이 바로 연결한다. 시세·뉴스를 대신 부르는 서버(Node)도 원래 프록시를 쓰지 않는다.
+    // Windows의 "자동으로 설정 검색"(WPAD)을 기다리느라 첫 화면이 20초쯤 비어 있던 것을 막는다.
+    await session.defaultSession.setProxy({ mode: "direct" });
     openWindow();
     if (app.isPackaged) watchUpdates();
     else updateStatus = "개발 실행이라 업데이트를 확인하지 않습니다";
