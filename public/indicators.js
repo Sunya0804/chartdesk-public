@@ -2127,6 +2127,900 @@ window.ChartDeskIndicators = (() => {
 		[line('move', '7일 변동폭 %', '#f5a623', { width: 2 }), hist('three', '3일 등락 %')],
 		wonyoRegime, { draw: drawWonyo, group: 'personal', levels: [15, 7] }));
 
+	// ---------- 커스텀 지표: TradingView 인기 공개 스크립트 ----------
+	// 위와 같이 공개된 계산식을 다시 구현한 것이다. 원본은 TradingView 공개 라이브러리에서 좋아요·부스트가 많은 오픈 소스 지표다.
+	// 차트 위에 표시를 남기는 지표(신호, 상자, 추세선)는 drawShapes로 그린다.
+
+	/** Pine의 pivothigh/pivotlow. 고점·저점이 확인되는 봉(오른쪽으로 right봉 뒤)에 그 값을 둔다. */
+	function pivots(x, left, right, high) {
+		const out = blank(x.length);
+		for (let i = left + right; i < x.length; i++) {
+			const at = i - right;
+			const value = x[at];
+			if (value === null) continue;
+			let found = true;
+			for (let j = at - left; j <= at + right && found; j++) {
+				if (j === at || x[j] === null) continue;
+				found = high ? (j < at ? value > x[j] : value >= x[j]) : (j < at ? value < x[j] : value <= x[j]);
+			}
+			if (found) out[i] = value;
+		}
+		return out;
+	}
+
+	/** 빈 자리를 직전 값으로 채운다 (Pine의 fixnan). */
+	const carry = (x) => {
+		let last = null;
+		return x.map(value => (value === null ? last : (last = value)));
+	};
+	const crossUp = (a, b, i) => i > 0 && a[i] !== null && b[i] !== null && a[i - 1] !== null && b[i - 1] !== null && a[i] > b[i] && a[i - 1] <= b[i - 1];
+	const crossDown = (a, b, i) => crossUp(b, a, i);
+	/** 직전 값보다 오르면 up, 내리면 down, 같으면 앞의 색을 잇는다. */
+	function slopeColors(x, back = 1, up = UP, down = DOWN) {
+		let color = up;
+		return x.map((value, i) => {
+			if (value === null) return null;
+			const before = x[i - back];
+			if (i >= back && before !== null && value !== before) color = value > before ? up : down;
+			return color;
+		});
+	}
+
+	function hull(x, n) {
+		const half = wma(x, Math.max(1, Math.floor(n / 2)));
+		return wma(zip(half, wma(x, n), (fast, slow) => 2 * fast - slow), Math.max(1, Math.round(Math.sqrt(n))));
+	}
+
+	/** 틸슨 T3: 지수 이동평균 여섯 번을 계수로 섞는다. */
+	function tillson(x, n, a) {
+		const e1 = ema(x, n);
+		const e2 = ema(e1, n);
+		const e3 = ema(e2, n);
+		const e4 = ema(e3, n);
+		const e5 = ema(e4, n);
+		const e6 = ema(e5, n);
+		const c1 = -(a ** 3);
+		const c2 = 3 * a ** 2 + 3 * a ** 3;
+		const c3 = -6 * a ** 2 - 3 * a - 3 * a ** 3;
+		const c4 = 1 + 3 * a + a ** 3 + 3 * a ** 2;
+		return e6.map((value, i) => (value === null ? null : c1 * value + c2 * e5[i] + c3 * e4[i] + c4 * e3[i]));
+	}
+
+	const volumeAverage = (s, x, n) => zip(sma(x.map((value, i) => (value === null ? null : value * s.v[i])), n), sma(s.v, n), (money, volume) => (volume === 0 ? null : money / volume));
+	const MA_TYPES = '1 SMA · 2 EMA · 3 WMA · 4 HMA · 5 VWMA · 6 RMA · 7 TEMA · 8 T3';
+	/** 설정의 번호로 고르는 이동평균. */
+	function movingBy(type, s, x, n) {
+		switch (Math.round(type)) {
+			case 2: return ema(x, n);
+			case 3: return wma(x, n);
+			case 4: return hull(x, n);
+			case 5: return volumeAverage(s, x, n);
+			case 6: return rma(x, n);
+			case 7: {
+				const one = ema(x, n);
+				const two = ema(one, n);
+				const three = ema(two, n);
+				return one.map((value, i) => (three[i] === null ? null : 3 * value - 3 * two[i] + three[i]));
+			}
+			case 8: return tillson(x, n, 0.7);
+			default: return sma(x, n);
+		}
+	}
+
+	const pivotDots = (k, label, back) => ({ k, label, type: 'dots', color: '#9ca3af', fixedColor: true, shift: back });
+
+	/** 선으로 그릴 수 없는 부분(신호 표시, 상자, 선분)을 가격 차트 위에 그린다. 색은 'up'/'down'이면 화면의 상승·하락 색을 쓴다. */
+	function drawShapes(context, view, data) {
+		const paint = color => (color === 'up' ? view.up : color === 'down' ? view.down : color);
+		const x = index => view.barX(index);
+		context.save();
+		context.font = `10px ${ view.font }`;
+		context.textBaseline = 'middle';
+		for (const box of data.boxes ?? []) {
+			const [top, bottom, from] = [view.priceY(box.top), view.priceY(box.bottom), x(box.from)];
+			if (top === null || bottom === null || from === null) continue;
+			const to = box.to === null || box.to === undefined ? view.width : x(box.to);
+			const left = Math.max(0, from);
+			if (to === null || to <= left || left > view.width) continue;
+			const color = paint(box.color);
+			context.fillStyle = tint(color, box.alpha ?? 0.14);
+			context.fillRect(left, Math.min(top, bottom), Math.min(view.width, to) - left, Math.max(1, Math.abs(bottom - top)));
+			if (box.text) {
+				context.fillStyle = tint(color, 0.9);
+				context.textAlign = 'right';
+				context.fillText(box.text, Math.min(view.width, to) - 4, (top + bottom) / 2);
+			}
+		}
+		for (const seg of data.segs ?? []) {
+			const [ax, ay, bx, by] = [x(seg.a), view.priceY(seg.pa), x(seg.b), view.priceY(seg.pb)];
+			if (ax === null || ay === null || bx === null || by === null) continue;
+			if (Math.max(ax, bx) < 0 || Math.min(ax, bx) > view.width) continue;
+			context.strokeStyle = paint(seg.color);
+			context.lineWidth = seg.width ?? 1;
+			context.setLineDash(seg.dash ?? []);
+			context.beginPath();
+			context.moveTo(ax, ay);
+			context.lineTo(bx, by);
+			context.stroke();
+			context.setLineDash([]);
+			if (seg.text) {
+				context.fillStyle = paint(seg.color);
+				context.textAlign = 'left';
+				context.fillText(seg.text, Math.min(view.width - 40, bx + 4), by + (seg.textUp ? -8 : 8));
+			}
+		}
+		context.textAlign = 'center';
+		for (const mark of data.marks ?? []) {
+			const [at, y] = [x(mark.i), view.priceY(mark.price)];
+			if (at === null || y === null || at < -10 || at > view.width + 10) continue;
+			const color = paint(mark.color ?? (mark.dir > 0 ? 'up' : 'down'));
+			const tip = y + (mark.dir > 0 ? 6 : -6);
+			context.fillStyle = color;
+			context.beginPath();
+			context.moveTo(at, tip);
+			context.lineTo(at - 4, tip + (mark.dir > 0 ? 7 : -7));
+			context.lineTo(at + 4, tip + (mark.dir > 0 ? 7 : -7));
+			context.closePath();
+			context.fill();
+			if (mark.text) context.fillText(mark.text, at, tip + (mark.dir > 0 ? 15 : -15));
+		}
+		context.restore();
+	}
+
+	const shapes = extra => ({ draw: drawShapes, ...extra });
+	const lastOf = (list, n) => (n >= 1 ? list.slice(-Math.round(n)) : []);
+
+	// 히스토그램 네 가지 색: 0 위에서 커지면 진한 청록, 줄면 파랑, 0 아래에서 커지면 빨강, 줄면 자주.
+	const fourColors = (x, colors = ['#26c6da', '#1e88e5', '#ef5350', '#a21caf']) => x.map((value, i) => {
+		if (value === null) return null;
+		const before = x[i - 1] ?? value;
+		return value >= 0 ? (value >= before ? colors[0] : colors[1]) : (value <= before ? colors[2] : colors[3]);
+	});
+
+	const communityDefs = [
+		custom('cmmacd', 'CM MACD', 'CM_MacD_Ult_MTF', 'CM MACD 얼티밋', 'cm macd chrismoody 4색 히스토그램 교차', 'ChrisMoody', false, 'price',
+			[num('fast', '단기', 12), num('slow', '장기', 26), num('signal', '시그널 (단순평균)', 9)],
+			[hist('hist', '히스토그램'), colored('macd', 'MACD'), line('signal', '시그널', '#facc15', { width: 2 }),
+				{ k: 'cross', label: '교차', type: 'dots', color: '#e5e7eb', fixedColor: true }],
+			(s, p) => {
+				const macd = zip(ema(s.c, p.fast), ema(s.c, p.slow), (fast, slow) => fast - slow);
+				const signal = sma(macd, p.signal);
+				const bars = zip(macd, signal, (a, b) => a - b);
+				const cross = bars.map((value, i) => (value !== null && bars[i - 1] !== null && i > 0 && Math.sign(value) !== Math.sign(bars[i - 1]) ? macd[i] : null));
+				const side = bars.map(value => (value === null ? null : value >= 0 ? UP : DOWN));
+				return { hist: bars, macd, signal, cross, $colors: { hist: fourColors(bars), macd: side, cross: side } };
+			}, { levels: [0] }),
+		custom('bbrsi', 'BB+RSI', 'Bollinger + RSI, Double Strategy', '볼린저 + RSI 이중 전략', 'bollinger rsi double strategy chartart 매수 매도', 'ChartArt', true, 'price',
+			[num('rsi', 'RSI 기간', 6), num('level', 'RSI 기준선', 50), length(200, 'BB 기간'), num('mult', 'BB 승수', 2, 0.1, 0.1)],
+			[line('basis', '중심선', '#f59e0b'), line('upper', '상단', '#ef4444'), line('lower', '하단', '#22c55e')],
+			(s, p) => {
+				const basis = sma(s.c, p.length);
+				const dev = stdev(s.c, p.length);
+				const upper = zip(basis, dev, (mid, d) => mid + p.mult * d);
+				const lower = zip(basis, dev, (mid, d) => mid - p.mult * d);
+				const strength = rsi(s.c, p.rsi);
+				const level = s.c.map(() => p.level);
+				// RSI가 기준선을 넘는 봉에 가격도 밴드 밖에서 안으로(또는 안에서 밖으로) 넘어올 때만 신호를 낸다.
+				const marks = [];
+				for (let i = 1; i < s.n; i++) {
+					if (crossUp(strength, level, i) && crossUp(s.c, lower, i)) marks.push({ i, price: s.l[i], dir: 1, text: '매수' });
+					if (crossDown(strength, level, i) && crossDown(s.c, upper, i)) marks.push({ i, price: s.h[i], dir: -1, text: '매도' });
+				}
+				return { basis, upper, lower, $draw: { marks: marks.slice(-200) } };
+			}, shapes()),
+		custom('cmultma', 'CM MA', 'CM_Ultimate_MA_MTF_V2', 'CM 얼티밋 이동평균', 'cm ultimate ma chrismoody 이평 색 기울기', 'ChrisMoody', true, 'price',
+			[num('type', `종류 (${ MA_TYPES })`, 1), length(20), num('back', '기울기 비교 봉 수', 2), num('type2', '두 번째 선 종류 (0 = 끔)', 0, 0), num('length2', '두 번째 선 기간', 50)],
+			[colored('ma', '이동평균'), colored('ma2', '두 번째 선', 1)],
+			(s, p) => {
+				const ma = movingBy(p.type, s, s.c, p.length);
+				const ma2 = p.type2 >= 1 ? movingBy(p.type2, s, s.c, p.length2) : blank(s.n);
+				return { ma, ma2, $colors: { ma: slopeColors(ma, p.back), ma2: slopeColors(ma2, p.back) } };
+			}, { axisLabel: true }),
+		custom('tma', 'TMA', 'TMA Overlay', 'TMA 오버레이', 'tma overlay smma 21 50 100 200 장악형 engulfing arty', 'ArtyFXC', true, 'price',
+			[num('one', '1번 기간', 21), num('two', '2번 기간', 50), num('three', '3번 기간', 100), num('four', '4번 기간', 200), num('engulf', '장악형 캔들 표시 (1 켬 · 0 끔)', 1, 0)],
+			[line('one', 'SMMA 1', '#e5e7eb'), line('two', 'SMMA 2', '#22c55e'), line('three', 'SMMA 3', '#f59e0b'), line('four', 'SMMA 4', '#ef4444', { width: 2 })],
+			(s, p) => {
+				const marks = [];
+				if (p.engulf >= 1) {
+					for (let i = 1; i < s.n; i++) {
+						if (s.c[i] > s.o[i] && s.o[i - 1] > s.c[i - 1] && s.c[i] >= s.o[i - 1] && s.o[i] <= s.c[i - 1]) marks.push({ i, price: s.l[i], dir: 1 });
+						if (s.c[i] < s.o[i] && s.o[i - 1] < s.c[i - 1] && s.c[i] <= s.o[i - 1] && s.o[i] >= s.c[i - 1]) marks.push({ i, price: s.h[i], dir: -1 });
+					}
+				}
+				return { one: rma(s.c, p.one), two: rma(s.c, p.two), three: rma(s.c, p.three), four: rma(s.c, p.four), $draw: { marks: marks.slice(-300) } };
+			}, shapes()),
+		custom('srbreaks', 'S/R Breaks', 'Support and Resistance Levels with Breaks', '지지·저항 돌파', 'support resistance levels breaks luxalgo 지지 저항 돌파 거래량', 'LuxAlgo', true, 'price',
+			[num('left', '왼쪽 봉 수', 15), num('right', '오른쪽 봉 수', 15), num('volume', '거래량 오실레이터 기준 (%)', 20, 0)],
+			[line('resistance', '저항', '#ef4444', { width: 2, shift: p => -(p.right + 1) }), line('support', '지지', '#3b82f6', { width: 2, shift: p => -(p.right + 1) })],
+			(s, p) => {
+				const resistance = lag(carry(pivots(s.h, p.left, p.right, true)), 1);
+				const support = lag(carry(pivots(s.l, p.left, p.right, false)), 1);
+				const short = ema(s.v, 5);
+				const long = ema(s.v, 10);
+				const osc = zip(short, long, (a, b) => (b === 0 ? 0 : 100 * (a - b) / b));
+				const marks = [];
+				for (let i = 1; i < s.n; i++) {
+					const loud = osc[i] !== null && osc[i] > p.volume;
+					if (crossUp(s.c, resistance, i)) {
+						if (s.o[i] - s.l[i] > s.c[i] - s.o[i]) marks.push({ i, price: s.l[i], dir: 1, text: '꼬리', color: '#22c55e' });
+						else if (loud) marks.push({ i, price: s.l[i], dir: 1, text: 'B' });
+					}
+					if (crossDown(s.c, support, i)) {
+						if (s.o[i] - s.c[i] < s.h[i] - s.o[i]) marks.push({ i, price: s.h[i], dir: -1, text: '꼬리', color: '#f97316' });
+						else if (loud) marks.push({ i, price: s.h[i], dir: -1, text: 'B' });
+					}
+				}
+				return { resistance, support, $draw: { marks: marks.slice(-200) } };
+			}, shapes()),
+		custom('wae', 'WAE', 'Waddah Attar Explosion', '와다 아타르 익스플로전', 'waddah attar explosion wae 폭발 데드존', 'LazyBear', false, 'osc',
+			[num('sensitivity', '민감도', 150), num('fast', 'MACD 단기', 20), num('slow', 'MACD 장기', 40), num('channel', 'BB 기간', 20), num('mult', 'BB 승수', 2, 0.1, 0.1)],
+			[hist('up', '상승 힘'), hist('down', '하락 힘'), line('explosion', '폭발선', '#d2691e', { width: 2 }), line('dead', '데드존', '#3b82f6')],
+			(s, p) => {
+				const macd = zip(ema(s.c, p.fast), ema(s.c, p.slow), (fast, slow) => fast - slow);
+				const t1 = map(change(macd), value => value * p.sensitivity);
+				const basis = sma(s.c, p.channel);
+				const explosion = map(stdev(s.c, p.channel), dev => 2 * p.mult * dev).map((value, i) => (basis[i] === null ? null : value));
+				const dead = map(rma(trueRange(s), 100), value => value * 3.7);
+				const up = map(t1, value => (value >= 0 ? value : 0));
+				const down = map(t1, value => (value < 0 ? -value : 0));
+				const grow = (x, strong, weak) => x.map((value, i) => (value === null ? null : value >= (x[i - 1] ?? 0) ? strong : weak));
+				return { up, down, explosion, dead, $colors: { up: grow(up, UP, UP_SOFT), down: grow(down, DOWN, DOWN_SOFT) } };
+			}),
+		custom('cipherb', 'Cipher B', 'VuManChu Cipher B', '뷰만추 사이퍼 B', 'vumanchu cipher b market cipher wavetrend money flow 매수 점', 'vumanchu', false, 'osc',
+			[num('channel', 'WT 채널 기간', 9), num('average', 'WT 평균 기간', 12), num('ma', 'WT2 기간', 3), num('flow', '자금 흐름 기간', 60), num('ob', '과매수', 53), num('os', '과매도 (음수로 씀)', 53)],
+			[hist('flow', '자금 흐름'), line('wt1', 'WT1', '#90caf9', { width: 2 }), line('wt2', 'WT2', '#3949ab'),
+				{ k: 'buy', label: '매수 점', type: 'dots', color: '#22c55e' }, { k: 'sell', label: '매도 점', type: 'dots', color: '#ef4444' }],
+			(s, p) => {
+				const mean = ema(s.hlc3, p.channel);
+				const spread = ema(s.hlc3.map((price, i) => (mean[i] === null ? null : Math.abs(price - mean[i]))), p.channel);
+				const wt1 = ema(s.hlc3.map((price, i) => (spread[i] === null ? null : spread[i] === 0 ? 0 : (price - mean[i]) / (0.015 * spread[i]))), p.average);
+				const wt2 = sma(wt1, p.ma);
+				// 봉의 몸통이 전체 폭에서 차지하는 비율의 평균(원본의 RSI+MFI 영역).
+				const flow = map(sma(s.c.map((close, i) => (s.h[i] === s.l[i] ? 0 : (close - s.o[i]) / (s.h[i] - s.l[i]) * 150)), p.flow), value => value - 2.5);
+				const diff = zip(wt1, wt2, (a, b) => a - b);
+				const buy = blank(s.n);
+				const sell = blank(s.n);
+				for (let i = 1; i < s.n; i++) {
+					if (diff[i] === null || diff[i - 1] === null || Math.sign(diff[i]) === Math.sign(diff[i - 1])) continue;
+					if (diff[i] >= 0 && wt2[i] <= -p.os) buy[i] = wt2[i];
+					if (diff[i] < 0 && wt2[i] >= p.ob) sell[i] = wt2[i];
+				}
+				return { flow, wt1, wt2, buy, sell, $colors: { flow: signed(flow) } };
+			}, { levels: [60, 53, 0, -53, -60] }),
+		custom('ppst', 'PPST', 'Pivot Point SuperTrend', '피벗 포인트 슈퍼트렌드', 'pivot point supertrend lonesometheblue 피벗 추세', 'LonesomeTheBlue', true, 'price',
+			[num('prd', '피벗 좌우 봉 수', 2), num('factor', 'ATR 승수', 3, 0.1, 0.1), num('atr', 'ATR 기간', 10)],
+			[colored('trail', 'PPST'), line('center', '피벗 중심선', '#3b82f6')],
+			(s, p) => {
+				const highs = pivots(s.h, p.prd, p.prd, true);
+				const lows = pivots(s.l, p.prd, p.prd, false);
+				const range = atr(s, p.atr);
+				const trail = blank(s.n);
+				const centerLine = blank(s.n);
+				const colors = blank(s.n);
+				let center = null;
+				let up = null;
+				let down = null;
+				let trend = 1;
+				for (let i = 0; i < s.n; i++) {
+					const point = highs[i] ?? lows[i];
+					if (point !== null) center = center === null ? point : (center * 2 + point) / 3;
+					if (center === null || range[i] === null) continue;
+					const nextUp = center - p.factor * range[i];
+					const nextDown = center + p.factor * range[i];
+					const [beforeUp, beforeDown] = [up, down];
+					up = beforeUp !== null && s.c[i - 1] > beforeUp ? Math.max(nextUp, beforeUp) : nextUp;
+					down = beforeDown !== null && s.c[i - 1] < beforeDown ? Math.min(nextDown, beforeDown) : nextDown;
+					if (beforeDown !== null && s.c[i] > beforeDown) trend = 1;
+					else if (beforeUp !== null && s.c[i] < beforeUp) trend = -1;
+					trail[i] = trend === 1 ? up : down;
+					colors[i] = trend === 1 ? UP : DOWN;
+					centerLine[i] = center;
+				}
+				return { trail, center: centerLine, $colors: { trail: colors } };
+			}),
+		custom('dtr', 'DTR', 'Donchian Trend Ribbon', '돈치안 트렌드 리본', 'donchian trend ribbon lonesometheblue 돈치안 리본 추세', 'LonesomeTheBlue', false, 'osc',
+			[length(20, '기본 기간 (10 이상)')],
+			Array.from({ length: 10 }, (_, i) => line(`r${ i }`, `${ i + 1 }번 줄`, UP, { width: 4, fixedColor: true })),
+			(s, p) => {
+				const base = Math.max(10, p.length);
+				// 기간 n의 돈치안 채널: 종가가 직전 최고가를 넘으면 상승, 최저가를 깨면 하락.
+				const trendOf = (n) => {
+					const top = lag(highest(s.h, n), 1);
+					const bottom = lag(lowest(s.l, n), 1);
+					let trend = 0;
+					return s.c.map((close, i) => {
+						if (top[i] === null) return null;
+						if (close > top[i]) trend = 1;
+						else if (close < bottom[i]) trend = -1;
+						return trend;
+					});
+				};
+				const main = trendOf(base);
+				const out = { $colors: {} };
+				for (let k = 0; k < 10; k++) {
+					const trend = k === 0 ? main : trendOf(base - k);
+					out[`r${ k }`] = trend.map((value, i) => (value === null || main[i] === null || main[i] === 0 ? null : 10 - k));
+					out.$colors[`r${ k }`] = trend.map((value, i) => (main[i] === 1 ? (value === 1 ? UP : UP_SOFT) : main[i] === -1 ? (value === -1 ? DOWN : DOWN_SOFT) : null));
+				}
+				return out;
+			}, { axisLabel: false }),
+		custom('srchannel', 'S/R 채널', 'Support Resistance Channels', '지지·저항 채널', 'support resistance channels lonesometheblue 지지 저항 채널 매물대', 'LonesomeTheBlue', true, 'price',
+			[num('prd', '피벗 좌우 봉 수', 10, 4), num('width', '채널 최대 폭 (최근 300봉 범위의 %)', 5, 1), num('strength', '최소 세기 (피벗 수)', 1), num('count', '채널 수', 6), num('back', '살펴볼 최근 봉 수', 290, 100, 10)],
+			[pivotDots('pivot', '피벗', p => -p.prd)],
+			(s, p) => {
+				const highs = pivots(s.h, p.prd, p.prd, true);
+				const lows = pivots(s.l, p.prd, p.prd, false);
+				const pivot = highs.map((value, i) => value ?? lows[i]);
+				const last = s.n - 1;
+				const from = Math.max(0, last - p.back);
+				const values = [];
+				for (let i = from; i <= last; i++) if (pivot[i] !== null) values.push(pivot[i]);
+				const span = Math.min(300, s.n);
+				let top = -Infinity;
+				let bottom = Infinity;
+				for (let i = s.n - span; i < s.n; i++) {
+					top = Math.max(top, s.h[i]);
+					bottom = Math.min(bottom, s.l[i]);
+				}
+				const room = (top - bottom) * p.width / 100;
+				// 피벗마다 폭 안에 들어오는 다른 피벗을 모아 채널을 만들고, 피벗 수(×20)와 채널을 건드린 봉 수로 세기를 매긴다.
+				const channels = values.map((value) => {
+					let high = value;
+					let low = value;
+					let strength = 0;
+					for (const other of values) {
+						const width = other <= high ? high - other : other - low;
+						if (width > room) continue;
+						if (other <= high) low = Math.min(low, other);
+						else high = Math.max(high, other);
+						strength += 20;
+					}
+					for (let i = from; i <= last; i++) if ((s.h[i] <= high && s.h[i] >= low) || (s.l[i] <= high && s.l[i] >= low)) strength++;
+					return { high, low, strength };
+				}).sort((a, b) => b.strength - a.strength);
+				const chosen = [];
+				for (const channel of channels) {
+					if (chosen.length >= p.count || channel.strength < p.strength * 20) break;
+					if (chosen.some(other => channel.low <= other.high && channel.high >= other.low)) continue;
+					chosen.push(channel);
+				}
+				const close = s.c[last];
+				const boxes = chosen.map(channel => ({
+					from, top: channel.high, bottom: channel.low, alpha: 0.18,
+					color: close > channel.high ? 'up' : close < channel.low ? 'down' : '#9ca3af',
+					text: close > channel.high ? '지지' : close < channel.low ? '저항' : '안',
+				}));
+				return { pivot: pivot.map((value, i) => (value === null ? null : i - p.prd >= 0 ? value : null)), $draw: { boxes } };
+			}, shapes()),
+		custom('tlbreaks', 'Trendlines', 'Trendlines with Breaks', '추세선 돌파', 'trendlines breaks luxalgo 추세선 돌파 자동', 'LuxAlgo', true, 'price',
+			[length(14, '스윙 좌우 봉 수'), num('mult', '기울기 승수', 1, 0.1, 0.1)],
+			[pivotDots('pivot', '스윙', p => -p.length)],
+			(s, p) => {
+				const highs = pivots(s.h, p.length, p.length, true);
+				const lows = pivots(s.l, p.length, p.length, false);
+				const slope = map(atr(s, p.length), value => value / p.length * p.mult);
+				const marks = [];
+				const lines = { up: [], down: [] };
+				// 추세선 하나는 스윙 봉(i - length)에서 시작해 다음 스윙이 확정되기 전까지 같은 기울기로 이어진다.
+				const close = (list, line, end, sign, color) => {
+					if (line && end > line.a) list.push({ a: line.a, pa: line.pa, b: end, pb: line.pa + sign * line.slope * (end - line.a), color });
+				};
+				let [lineHigh, lineLow] = [null, null];
+				let [top, bottom, slopeHigh, slopeLow, aboveTop, belowBottom] = [null, null, 0, 0, 0, 0];
+				for (let i = 0; i < s.n; i++) {
+					const fresh = [highs[i] !== null, lows[i] !== null];
+					if (fresh[0]) {
+						slopeHigh = slope[i] ?? 0;
+						top = highs[i];
+						close(lines.down, lineHigh, i - 1 - p.length, -1, '#ef4444');
+						lineHigh = { a: i - p.length, pa: top, slope: slopeHigh };
+					}
+					else if (top !== null) top -= slopeHigh;
+					if (fresh[1]) {
+						slopeLow = slope[i] ?? 0;
+						bottom = lows[i];
+						close(lines.up, lineLow, i - 1 - p.length, 1, '#22c55e');
+						lineLow = { a: i - p.length, pa: bottom, slope: slopeLow };
+					}
+					else if (bottom !== null) bottom += slopeLow;
+					const wasTop = aboveTop;
+					const wasBottom = belowBottom;
+					aboveTop = fresh[0] ? 0 : top !== null && s.c[i] > top - slopeHigh * p.length ? 1 : aboveTop;
+					belowBottom = fresh[1] ? 0 : bottom !== null && s.c[i] < bottom + slopeLow * p.length ? 1 : belowBottom;
+					if (aboveTop > wasTop) marks.push({ i, price: s.l[i], dir: 1, text: 'B' });
+					if (belowBottom > wasBottom) marks.push({ i, price: s.h[i], dir: -1, text: 'B' });
+				}
+				// 마지막 추세선은 확인된 곳까지 실선, 거기서 지금 봉까지는 점선으로 그린다.
+				const last = s.n - 1;
+				close(lines.down, lineHigh, last - p.length, -1, '#ef4444');
+				close(lines.up, lineLow, last - p.length, 1, '#22c55e');
+				const segs = [...lines.down.slice(-30), ...lines.up.slice(-30)];
+				if (top !== null) segs.push({ a: last - p.length, pa: top, b: last, pb: top - slopeHigh * p.length, color: '#ef4444', dash: [4, 3] });
+				if (bottom !== null) segs.push({ a: last - p.length, pa: bottom, b: last, pb: bottom + slopeLow * p.length, color: '#22c55e', dash: [4, 3] });
+				return { pivot: highs.map((value, i) => value ?? lows[i]), $draw: { marks: marks.slice(-200), segs } };
+			}, shapes()),
+		custom('impulse', 'Impulse', 'Elder Impulse System', '엘더 임펄스 시스템', 'elder impulse system 임펄스 ema macd', 'LazyBear (Alexander Elder)', false, 'price',
+			[num('ema', 'EMA 기간', 13), num('fast', 'MACD 단기', 12), num('slow', 'MACD 장기', 26), num('signal', 'MACD 시그널', 9)],
+			[hist('hist', '임펄스')],
+			(s, p) => {
+				const trend = ema(s.c, p.ema);
+				const macd = zip(ema(s.c, p.fast), ema(s.c, p.slow), (fast, slow) => fast - slow);
+				const bars = zip(macd, ema(macd, p.signal), (a, b) => a - b);
+				// 추세(EMA)와 힘(MACD 히스토그램)이 함께 오르면 초록, 함께 내리면 빨강, 엇갈리면 파랑.
+				const colors = bars.map((value, i) => {
+					if (value === null || i === 0 || bars[i - 1] === null || trend[i - 1] === null) return null;
+					const up = trend[i] > trend[i - 1] && value > bars[i - 1];
+					const down = trend[i] < trend[i - 1] && value < bars[i - 1];
+					return up ? UP : down ? DOWN : '#3b82f6';
+				});
+				return { hist: bars, $colors: { hist: colors } };
+			}, { levels: [0] }),
+		custom('vfi', 'VFI', 'Volume Flow Indicator', '거래량 흐름 지표', 'volume flow indicator vfi 거래량 흐름 katsanos', 'LazyBear (Markos Katsanos)', false, 'osc',
+			[length(130), num('coef', '잡음 기준 계수', 0.2, 0.01, 0.01), num('vcoef', '거래량 상한 배수', 2.5, 0.1, 0.1), num('signal', '시그널', 5)],
+			[hist('diff', '차이'), line('vfi', 'VFI', '#22c55e', { width: 2 }), line('signal', '시그널', '#f97316')],
+			(s, p) => {
+				const logs = s.hlc3.map((price, i) => (i === 0 || price <= 0 || s.hlc3[i - 1] <= 0 ? null : Math.log(price) - Math.log(s.hlc3[i - 1])));
+				const noise = stdev(logs, 30);
+				const volume = lag(sma(s.v, p.length), 1);
+				const flow = s.hlc3.map((price, i) => {
+					if (i === 0 || noise[i] === null || volume[i] === null) return null;
+					const cutoff = p.coef * noise[i] * s.c[i];
+					const capped = Math.min(s.v[i], volume[i] * p.vcoef);
+					const move = price - s.hlc3[i - 1];
+					return move > cutoff ? capped : move < -cutoff ? -capped : 0;
+				});
+				const vfi = zip(total(flow, p.length), volume, (sum, average) => (average === 0 ? null : sum / average));
+				const signal = ema(vfi, p.signal);
+				const diff = zip(vfi, signal, (a, b) => a - b);
+				return { diff, vfi, signal, $colors: { diff: signed(diff) } };
+			}, { levels: [0] }),
+		custom('itrend', 'iTrend', 'Ehlers Instantaneous Trendline', '엘러스 순간 추세선', 'ehlers instantaneous trendline itrend', 'LazyBear (John Ehlers)', true, 'price',
+			[num('alpha', '알파', 0.07, 0.01, 0.01)],
+			[line('trend', '순간 추세선', '#3b82f6', { width: 2 }), line('trigger', '트리거', '#ef4444')],
+			(s, p) => {
+				const a = p.alpha;
+				const src = s.hl2;
+				const trend = blank(s.n);
+				for (let i = 0; i < s.n; i++) {
+					trend[i] = i < 7
+						? (src[i] + 2 * (src[i - 1] ?? src[i]) + (src[i - 2] ?? src[i])) / 4
+						: (a - a * a / 4) * src[i] + 0.5 * a * a * src[i - 1] - (a - 0.75 * a * a) * src[i - 2] + 2 * (1 - a) * trend[i - 1] - (1 - a) ** 2 * trend[i - 2];
+				}
+				return { trend, trigger: trend.map((value, i) => (i < 2 ? null : 2 * value - trend[i - 2])) };
+			}),
+		custom('mama', 'MAMA', 'MESA Adaptive Moving Average', '메사 적응형 이동평균', 'mesa adaptive moving average mama fama ehlers', 'LazyBear (John Ehlers)', true, 'price',
+			[num('fast', '빠른 한도', 0.5, 0.01, 0.01), num('slow', '느린 한도', 0.05, 0.01, 0.01)],
+			[line('mama', 'MAMA', '#f59e0b', { width: 2 }), line('fama', 'FAMA', '#3b82f6')],
+			(s, p) => {
+				const src = s.hl2;
+				const n = s.n;
+				const [smooth, detrender, i1, q1, i2, q2, re, im, period, phase, mama, fama] = Array.from({ length: 12 }, () => new Array(n).fill(0));
+				const at = (x, i) => (i >= 0 ? x[i] : 0);
+				const hilbert = (x, i, k) => (0.0962 * at(x, i) + 0.5769 * at(x, i - 2) - 0.5769 * at(x, i - 4) - 0.0962 * at(x, i - 6)) * k;
+				const deg = Math.PI / 180;
+				const outMama = blank(n);
+				const outFama = blank(n);
+				for (let i = 0; i < n; i++) {
+					smooth[i] = (4 * src[i] + 3 * (src[i - 1] ?? src[i]) + 2 * (src[i - 2] ?? src[i]) + (src[i - 3] ?? src[i])) / 10;
+					const k = 0.075 * at(period, i - 1) + 0.54;
+					detrender[i] = hilbert(smooth, i, k);
+					i1[i] = at(detrender, i - 3);
+					q1[i] = hilbert(detrender, i, k);
+					const ji = hilbert(i1, i, k);
+					const jq = hilbert(q1, i, k);
+					i2[i] = 0.2 * (i1[i] - jq) + 0.8 * at(i2, i - 1);
+					q2[i] = 0.2 * (q1[i] + ji) + 0.8 * at(q2, i - 1);
+					re[i] = 0.2 * (i2[i] * at(i2, i - 1) + q2[i] * at(q2, i - 1)) + 0.8 * at(re, i - 1);
+					im[i] = 0.2 * (i2[i] * at(q2, i - 1) - q2[i] * at(i2, i - 1)) + 0.8 * at(im, i - 1);
+					let next = im[i] !== 0 && re[i] !== 0 ? 360 / (Math.atan(im[i] / re[i]) / deg) : at(period, i - 1);
+					const before = at(period, i - 1);
+					if (before > 0) next = Math.min(Math.max(next, 0.67 * before), 1.5 * before);
+					next = Math.min(Math.max(next, 6), 50);
+					period[i] = 0.2 * next + 0.8 * before;
+					phase[i] = i1[i] !== 0 ? Math.atan(q1[i] / i1[i]) / deg : at(phase, i - 1);
+					const delta = Math.max(at(phase, i - 1) - phase[i], 1);
+					const alpha = Math.min(Math.max(p.fast / delta, p.slow), p.fast);
+					mama[i] = i === 0 ? src[i] : alpha * src[i] + (1 - alpha) * mama[i - 1];
+					fama[i] = i === 0 ? src[i] : 0.5 * alpha * mama[i] + (1 - 0.5 * alpha) * fama[i - 1];
+					// 앞쪽 몇십 봉은 주기 추정이 자리를 잡기 전이라 그리지 않는다.
+					if (i >= 50) {
+						outMama[i] = mama[i];
+						outFama[i] = fama[i];
+					}
+				}
+				return { mama: outMama, fama: outFama };
+			}),
+		custom('t3', 'T3', 'Tillson T3 Moving Average', '틸슨 T3 이동평균', 'tillson t3 이평 kivancozbilgic', 'KivancOzbilgic', true, 'price',
+			[length(8), num('factor', '볼륨 팩터', 0.7, 0.1, 0.1)], [colored('t3', 'T3')],
+			(s, p) => {
+				const t3 = tillson(s.c, p.length, p.factor);
+				return { t3, $colors: { t3: slopeColors(t3) } };
+			}, { axisLabel: true }),
+		custom('most', 'MOST', 'Moving Stop Loss (MOST)', '무빙 스톱 로스', 'most moving stop loss kivancozbilgic 추적 손절', 'KivancOzbilgic', true, 'price',
+			[length(3, '이동평균 기간 (EMA)'), num('percent', '간격 (%)', 2, 0.1, 0.1)],
+			[line('ma', '이동평균', '#3b82f6'), colored('most', 'MOST')],
+			(s, p) => {
+				const ma = ema(s.c, p.length);
+				const most = blank(s.n);
+				const colors = blank(s.n);
+				let long = null;
+				let short = null;
+				let dir = 1;
+				for (let i = 0; i < s.n; i++) {
+					if (ma[i] === null) continue;
+					const gap = ma[i] * p.percent / 100;
+					const [beforeLong, beforeShort] = [long ?? ma[i] - gap, short ?? ma[i] + gap];
+					long = ma[i] > beforeLong ? Math.max(ma[i] - gap, beforeLong) : ma[i] - gap;
+					short = ma[i] < beforeShort ? Math.min(ma[i] + gap, beforeShort) : ma[i] + gap;
+					if (dir === -1 && ma[i] > beforeShort) dir = 1;
+					else if (dir === 1 && ma[i] < beforeLong) dir = -1;
+					most[i] = dir === 1 ? long : short;
+					colors[i] = ma[i] >= most[i] ? UP : DOWN;
+				}
+				return { ma, most, $colors: { most: colors } };
+			}),
+		custom('ifrsi', 'IFT RSI', 'Inverse Fisher Transform RSI', '역피셔 변환 RSI', 'inverse fisher transform rsi ift ehlers kivancozbilgic', 'KivancOzbilgic (John Ehlers)', false, 'osc',
+			[length(5, 'RSI 기간'), num('smooth', 'WMA 기간', 9)], [colored('ift', 'IFT RSI')],
+			(s, p) => {
+				const smooth = wma(map(rsi(s.c, p.length), value => 0.1 * (value - 50)), p.smooth);
+				const ift = map(smooth, value => (Math.exp(2 * value) - 1) / (Math.exp(2 * value) + 1));
+				return { ift, $colors: { ift: ift.map(value => (value === null ? null : value >= 0 ? UP : DOWN)) } };
+			}, { levels: [0.5, 0, -0.5] }),
+		custom('mavilim', 'Mavilim', 'Mavilim', '마빌림', 'mavilim kivancozbilgic 가중 이평', 'KivancOzbilgic', true, 'price',
+			[num('first', '첫 기간', 3), num('second', '둘째 기간', 5)], [colored('mavw', 'Mavilim')],
+			(s, p) => {
+				// 앞 두 기간을 더해 다음 기간을 만드는 피보나치식 가중 이동평균 6겹.
+				const lengths = [p.first, p.second];
+				while (lengths.length < 6) lengths.push(lengths[lengths.length - 1] + lengths[lengths.length - 2]);
+				const mavw = lengths.reduce((x, n) => wma(x, n), s.c);
+				return { mavw, $colors: { mavw: slopeColors(mavw) } };
+			}, { axisLabel: true }),
+		custom('vvidya', 'VIDYA', 'Volumatic Variable Index Dynamic Average', '볼륨매틱 VIDYA', 'volumatic vidya bigbeluga 가변 이평 cmo atr 밴드', 'BigBeluga', true, 'price',
+			[length(10, 'VIDYA 기간'), num('momentum', 'CMO 기간', 20), num('band', 'ATR 밴드 배수', 2, 0.1, 0.1)],
+			[colored('trend', 'VIDYA 추세'), line('vidya', 'VIDYA', '#9ca3af')],
+			(s, p) => {
+				const moves = change(s.c);
+				const up = total(map(moves, value => Math.max(value, 0)), p.momentum);
+				const down = total(map(moves, value => Math.max(-value, 0)), p.momentum);
+				const alpha = 2 / (p.length + 1);
+				const raw = blank(s.n);
+				let value = null;
+				for (let i = 0; i < s.n; i++) {
+					if (up[i] === null) continue;
+					const cmo = up[i] + down[i] === 0 ? 0 : Math.abs(100 * (up[i] - down[i]) / (up[i] + down[i]));
+					value = value === null ? s.c[i] : alpha * cmo / 100 * s.c[i] + (1 - alpha * cmo / 100) * value;
+					raw[i] = value;
+				}
+				const vidya = sma(raw, 15);
+				const range = atr(s, 200);
+				const trend = blank(s.n);
+				const colors = blank(s.n);
+				let side = 0;
+				for (let i = 0; i < s.n; i++) {
+					if (vidya[i] === null || range[i] === null) continue;
+					const upper = vidya[i] + range[i] * p.band;
+					const lower = vidya[i] - range[i] * p.band;
+					if (s.c[i] > upper) side = 1;
+					else if (s.c[i] < lower) side = -1;
+					if (side === 0) continue;
+					trend[i] = side === 1 ? lower : upper;
+					colors[i] = side === 1 ? UP : DOWN;
+				}
+				return { trend, vidya, $colors: { trend: colors } };
+			}),
+		custom('stai', 'ST AI', 'SuperTrend AI (Clustering)', '슈퍼트렌드 AI (군집)', 'supertrend ai clustering kmeans luxalgo 머신러닝 슈퍼트렌드', 'LuxAlgo', true, 'price',
+			[length(10, 'ATR 기간'), num('min', '최소 승수', 1, 0.1, 0.1), num('max', '최대 승수', 5, 0.1, 0.1), num('step', '승수 간격', 0.5, 0.1, 0.1), num('alpha', '성과 기억 기간', 10, 2)],
+			[colored('ts', '슈퍼트렌드'), colored('ama', '적응형 평균', 1)],
+			(s, p) => {
+				const factors = [];
+				for (let f = p.min; f <= p.max + 1e-9 && factors.length < 60; f += Math.max(0.1, p.step)) factors.push(f);
+				const range = atr(s, p.length);
+				const k = 2 / (p.alpha + 1);
+				// 승수마다 슈퍼트렌드를 돌리고, 그 방향을 따랐을 때의 성과를 지수 평활로 기억한다.
+				const runs = factors.map(() => ({ upper: null, lower: null, trend: 0, output: null, perf: 0 }));
+				const noise = ema(map(change(s.c), Math.abs), p.alpha);
+				const [ts, ama, tsColors, amaColors] = [blank(s.n), blank(s.n), blank(s.n), blank(s.n)];
+				let [upper, lower, side, average] = [null, null, 0, null];
+				for (let i = 1; i < s.n; i++) {
+					if (range[i] === null) continue;
+					const move = s.c[i] - s.c[i - 1];
+					factors.forEach((factor, j) => {
+						const run = runs[j];
+						const up = s.hl2[i] + range[i] * factor;
+						const dn = s.hl2[i] - range[i] * factor;
+						run.upper ??= s.hl2[i];
+						run.lower ??= s.hl2[i];
+						run.trend = s.c[i] > run.upper ? 1 : s.c[i] < run.lower ? 0 : run.trend;
+						run.upper = s.c[i - 1] < run.upper ? Math.min(up, run.upper) : up;
+						run.lower = s.c[i - 1] > run.lower ? Math.max(dn, run.lower) : dn;
+						const diff = run.output === null ? 0 : Math.sign(s.c[i - 1] - run.output);
+						run.perf += k * (move * diff - run.perf);
+						run.output = run.trend === 1 ? run.lower : run.upper;
+					});
+					// 성과를 세 무리(k-평균)로 나누고 가장 좋은 무리의 승수 평균을 쓴다.
+					const perfs = runs.map(run => run.perf);
+					const sorted = [...perfs].sort((a, b) => a - b);
+					let centers = [0.25, 0.5, 0.75].map(q => sorted[Math.floor(q * (sorted.length - 1))]);
+					let groups = [[], [], []];
+					for (let round = 0; round < 50; round++) {
+						groups = [[], [], []];
+						perfs.forEach((value, j) => {
+							let best = 0;
+							for (let c = 1; c < 3; c++) if (Math.abs(value - centers[c]) < Math.abs(value - centers[best])) best = c;
+							groups[best].push(j);
+						});
+						const next = groups.map((group, c) => (group.length ? group.reduce((sum, j) => sum + perfs[j], 0) / group.length : centers[c]));
+						if (next.every((value, c) => value === centers[c])) break;
+						centers = next;
+					}
+					const best = groups[2].length ? groups[2] : groups[1].length ? groups[1] : groups[0];
+					const factor = best.reduce((sum, j) => sum + factors[j], 0) / best.length;
+					const bestPerf = best.reduce((sum, j) => sum + perfs[j], 0) / best.length;
+					const up = s.hl2[i] + range[i] * factor;
+					const dn = s.hl2[i] - range[i] * factor;
+					upper = upper === null ? up : s.c[i - 1] < upper ? Math.min(up, upper) : up;
+					lower = lower === null ? dn : s.c[i - 1] > lower ? Math.max(dn, lower) : dn;
+					side = s.c[i] > upper ? 1 : s.c[i] < lower ? 0 : side;
+					ts[i] = side ? lower : upper;
+					const index = noise[i] ? Math.max(bestPerf, 0) / noise[i] : 0;
+					average = average === null ? ts[i] : average + Math.min(1, index) * (ts[i] - average);
+					ama[i] = average;
+					tsColors[i] = side ? UP : DOWN;
+					amaColors[i] = side ? UP_SOFT : DOWN_SOFT;
+				}
+				return { ts, ama, $colors: { ts: tsColors, ama: amaColors } };
+			}),
+		custom('twinrf', 'Twin RF', 'Twin Range Filter', '트윈 레인지 필터', 'twin range filter colinmck 매수 매도', 'colinmck', true, 'price',
+			[num('fast', '빠른 기간', 27), num('fastMult', '빠른 승수', 1.6, 0.1, 0.1), num('slow', '느린 기간', 55), num('slowMult', '느린 승수', 2, 0.1, 0.1)],
+			[colored('filter', '필터')],
+			(s, p) => {
+				const smoothRange = (n, mult) => map(ema(ema(map(change(s.c), Math.abs), n), n * 2 - 1), value => value * mult);
+				const range = zip(smoothRange(p.fast, p.fastMult), smoothRange(p.slow, p.slowMult), (a, b) => (a + b) / 2);
+				const filter = blank(s.n);
+				const colors = blank(s.n);
+				const marks = [];
+				let [value, upward, downward, state] = [null, 0, 0, 0];
+				for (let i = 0; i < s.n; i++) {
+					if (range[i] === null) continue;
+					const price = s.c[i];
+					const before = value;
+					if (value === null) value = price;
+					else if (price > value) value = price - range[i] < value ? value : price - range[i];
+					else value = price + range[i] > value ? value : price + range[i];
+					if (before !== null) {
+						upward = value > before ? upward + 1 : value < before ? 0 : upward;
+						downward = value < before ? downward + 1 : value > before ? 0 : downward;
+					}
+					filter[i] = value;
+					colors[i] = upward > 0 ? UP : downward > 0 ? DOWN : '#f59e0b';
+					const long = price > value && upward > 0;
+					const short = price < value && downward > 0;
+					if (long && state === -1) marks.push({ i, price: s.l[i], dir: 1, text: '매수' });
+					if (short && state === 1) marks.push({ i, price: s.h[i], dir: -1, text: '매도' });
+					state = long ? 1 : short ? -1 : state;
+				}
+				return { filter, $colors: { filter: colors }, $draw: { marks: marks.slice(-200) } };
+			}, shapes()),
+		custom('slingshot', 'Sling Shot', 'CM Sling Shot System', 'CM 슬링샷 시스템', 'cm sling shot chrismoody ema 38 62 눌림 진입', 'ChrisMoody', true, 'price',
+			[num('fast', '빠른 EMA', 38), num('slow', '느린 EMA', 62)],
+			[colored('fast', '빠른 EMA'), colored('slow', '느린 EMA', 1)],
+			(s, p) => {
+				const fast = ema(s.c, p.fast);
+				const slow = ema(s.c, p.slow);
+				const side = zip(fast, slow, (a, b) => (a >= b ? UP : DOWN));
+				// 추세 방향으로 빠른 선 아래(위)로 눌렸다가 다시 넘어오는 봉을 보수적 진입으로 표시한다.
+				const marks = [];
+				for (let i = 1; i < s.n; i++) {
+					if (fast[i] === null || slow[i] === null || fast[i - 1] === null) continue;
+					if (fast[i] >= slow[i] && s.c[i] > fast[i] && s.c[i - 1] < fast[i - 1]) marks.push({ i, price: s.l[i], dir: 1 });
+					if (fast[i] < slow[i] && s.c[i] < fast[i] && s.c[i - 1] > fast[i - 1]) marks.push({ i, price: s.h[i], dir: -1 });
+				}
+				return { fast, slow, $colors: { fast: side, slow: side }, $draw: { marks: marks.slice(-200) } };
+			}, shapes()),
+		custom('fibbb', 'Fib BB', 'Fibonacci Bollinger Bands', '피보나치 볼린저 밴드', 'fibonacci bollinger bands rashad 피보나치 볼린저', 'Rashad', true, 'price',
+			[length(200), num('mult', '승수', 3, 0.1, 0.1)],
+			[line('basis', '중심 (VWMA)', '#f59e0b', { width: 2 }),
+				...[0.236, 0.382, 0.5, 0.618, 0.764, 1].flatMap((ratio, i) => [
+					line(`u${ i }`, `상단 ${ ratio }`, ratio === 1 ? '#ef4444' : '#9ca3af'),
+					line(`l${ i }`, `하단 ${ ratio }`, ratio === 1 ? '#22c55e' : '#9ca3af'),
+				])],
+			(s, p) => {
+				const basis = s.v.some(value => value > 0) ? volumeAverage(s, s.hlc3, p.length) : sma(s.hlc3, p.length);
+				const dev = map(stdev(s.hlc3, p.length), value => value * p.mult);
+				const out = { basis };
+				[0.236, 0.382, 0.5, 0.618, 0.764, 1].forEach((ratio, i) => {
+					out[`u${ i }`] = zip(basis, dev, (mid, d) => mid + ratio * d);
+					out[`l${ i }`] = zip(basis, dev, (mid, d) => mid - ratio * d);
+				});
+				return out;
+			}),
+		custom('tdi', 'TDI', "Traders Dynamic Index", '트레이더스 다이내믹 인덱스', 'traders dynamic index tdi rsi 밴드 goldminds', 'Goldminds (Dean Malone)', false, 'osc',
+			[length(13, 'RSI 기간'), num('band', '밴드 기간', 34), num('mult', '밴드 승수', 1.6185, 0.1, 0.0001), num('fast', '가격선 기간', 2), num('slow', '시그널 기간', 7)],
+			[line('upper', '상단 밴드', '#3b82f6'), line('lower', '하단 밴드', '#3b82f6'), line('mid', '중심선', '#f59e0b', { width: 2 }),
+				line('price', 'RSI 가격선', '#22c55e', { width: 2 }), line('signal', '시그널', '#ef4444', { width: 2 })],
+			(s, p) => {
+				const strength = rsi(s.c, p.length);
+				const mid = sma(strength, p.band);
+				const dev = map(stdev(strength, p.band), value => value * p.mult);
+				return {
+					upper: zip(mid, dev, (m, d) => m + d), lower: zip(mid, dev, (m, d) => m - d), mid,
+					price: sma(strength, p.fast), signal: sma(strength, p.slow),
+				};
+			}, { levels: [68, 50, 32] }),
+		custom('ash', 'ASH', 'Absolute Strength Histogram', '절대 강도 히스토그램', 'absolute strength histogram ash 매수세 매도세 jiehonglim', 'jiehonglim', false, 'price',
+			[length(9), num('smooth', '평활 기간', 3), num('mode', '방식 (0 RSI · 1 스토캐스틱)', 0, 0), num('type', '평균 종류 (1 SMA · 2 EMA · 3 WMA · 6 RMA)', 1)],
+			[hist('diff', '차이'), line('bulls', '매수세', '#22c55e', { width: 2 }), line('bears', '매도세', '#ef4444', { width: 2 })],
+			(s, p) => {
+				const moves = change(s.c);
+				const stoch = p.mode >= 1;
+				const top = highest(s.h, p.length);
+				const bottom = lowest(s.l, p.length);
+				const rawBulls = stoch ? zip(s.c, bottom, (close, low) => close - low) : map(moves, value => 0.5 * (Math.abs(value) + value));
+				const rawBears = stoch ? zip(top, s.c, (high, close) => high - close) : map(moves, value => 0.5 * (Math.abs(value) - value));
+				const bulls = movingBy(p.type, s, movingBy(p.type, s, rawBulls, p.length), p.smooth);
+				const bears = movingBy(p.type, s, movingBy(p.type, s, rawBears, p.length), p.smooth);
+				const diff = zip(bulls, bears, (a, b) => Math.abs(a - b));
+				const colors = diff.map((value, i) => (value === null ? null
+					: bulls[i] > bears[i] ? (value >= (diff[i - 1] ?? value) ? UP : UP_SOFT) : (value >= (diff[i - 1] ?? value) ? DOWN : DOWN_SOFT)));
+				return { diff, bulls, bears, $colors: { diff: colors } };
+			}),
+		custom('fvg', 'FVG', 'Fair Value Gap', '페어 밸류 갭', 'fair value gap fvg luxalgo 갭 불균형 imbalance', 'LuxAlgo', true, 'price',
+			[num('threshold', '최소 갭 크기 (%) (0 = 자동)', 0, 0, 0.1), num('count', '표시할 미해소 갭 수 (방향별)', 5, 0), num('mitigated', '해소된 갭도 표시 (1 켬 · 0 끔)', 0, 0)],
+			[{ k: 'gap', label: '새 갭', type: 'dots', color: '#9ca3af', fixedColor: true }],
+			(s, p) => {
+				const gap = blank(s.n);
+				const colors = blank(s.n);
+				const open = [];
+				const closed = [];
+				let sumRange = 0;
+				for (let i = 0; i < s.n; i++) {
+					sumRange += s.l[i] > 0 ? (s.h[i] - s.l[i]) / s.l[i] : 0;
+					// 이미 있는 갭이 메워졌는지(종가가 갭을 지나갔는지) 본다.
+					for (let j = open.length - 1; j >= 0; j--) {
+						const item = open[j];
+						if ((item.dir > 0 && s.c[i] < item.bottom) || (item.dir < 0 && s.c[i] > item.top)) {
+							closed.push({ ...item, to: i });
+							open.splice(j, 1);
+						}
+					}
+					if (i < 2) continue;
+					const threshold = p.threshold > 0 ? p.threshold / 100 : sumRange / (i + 1);
+					if (s.l[i] > s.h[i - 2] && s.c[i - 1] > s.h[i - 2] && (s.l[i] - s.h[i - 2]) / s.h[i - 2] > threshold) {
+						open.push({ dir: 1, from: i - 2, top: s.l[i], bottom: s.h[i - 2] });
+						gap[i - 1] = (s.l[i] + s.h[i - 2]) / 2;
+						colors[i - 1] = UP;
+					}
+					if (s.h[i] < s.l[i - 2] && s.c[i - 1] < s.l[i - 2] && (s.l[i - 2] - s.h[i]) / s.h[i] > threshold) {
+						open.push({ dir: -1, from: i - 2, top: s.l[i - 2], bottom: s.h[i] });
+						gap[i - 1] = (s.l[i - 2] + s.h[i]) / 2;
+						colors[i - 1] = DOWN;
+					}
+				}
+				const box = (item, alpha) => ({ from: item.from, to: item.to ?? null, top: item.top, bottom: item.bottom, color: item.dir > 0 ? 'up' : 'down', alpha });
+				const boxes = [
+					...(p.mitigated >= 1 ? closed.slice(-40).map(item => box(item, 0.07)) : []),
+					...lastOf(open.filter(item => item.dir > 0), p.count).map(item => box(item, 0.2)),
+					...lastOf(open.filter(item => item.dir < 0), p.count).map(item => box(item, 0.2)),
+				];
+				return { gap, $colors: { gap: colors }, $draw: { boxes } };
+			}, shapes()),
+		custom('liqswings', 'Liquidity', 'Liquidity Swings', '유동성 스윙', 'liquidity swings luxalgo 유동성 스윙 고점 저점 스톱', 'LuxAlgo', true, 'price',
+			[length(14, '스윙 좌우 봉 수'), num('count', '표시할 스윙 수 (방향별)', 5, 1)],
+			[pivotDots('swing', '스윙', p => -p.length)],
+			(s, p) => {
+				const highs = pivots(s.h, p.length, p.length, true);
+				const lows = pivots(s.l, p.length, p.length, false);
+				const swing = highs.map((value, i) => value ?? lows[i]);
+				const found = [];
+				for (let i = 0; i < s.n; i++) {
+					const at = i - p.length;
+					// 고점 스윙의 영역은 고가부터 몸통 윗부분까지(윗꼬리), 저점은 몸통 아랫부분부터 저가까지.
+					if (highs[i] !== null) found.push({ dir: -1, at, top: s.h[at], bottom: Math.max(s.c[at], s.o[at]) });
+					if (lows[i] !== null) found.push({ dir: 1, at, top: Math.min(s.c[at], s.o[at]), bottom: s.l[at] });
+				}
+				const segs = [];
+				const boxes = [];
+				const pick = [...lastOf(found.filter(item => item.dir < 0), p.count), ...lastOf(found.filter(item => item.dir > 0), p.count)];
+				for (const item of pick) {
+					let touches = 0;
+					let volume = 0;
+					let end = null;
+					for (let i = item.at + 1; i < s.n; i++) {
+						if (s.l[i] < item.top && s.h[i] > item.bottom) {
+							touches++;
+							volume += s.v[i];
+						}
+						if ((item.dir < 0 && s.c[i] > item.top) || (item.dir > 0 && s.c[i] < item.bottom)) {
+							end = i;
+							break;
+						}
+					}
+					const price = item.dir < 0 ? item.top : item.bottom;
+					const color = item.dir < 0 ? 'down' : 'up';
+					const amount = volume > 0 ? ` · ${ volume >= 1e6 ? `${ (volume / 1e6).toFixed(1) }M` : volume >= 1e3 ? `${ (volume / 1e3).toFixed(1) }K` : Math.round(volume) }` : '';
+					segs.push({ a: item.at, pa: price, b: end ?? s.n - 1, pb: price, color, dash: end === null ? [] : [3, 3], text: end === null ? `${ touches }회${ amount }` : '', textUp: item.dir < 0 });
+					boxes.push({ from: item.at, to: end, top: item.top, bottom: item.bottom, color, alpha: end === null ? 0.12 : 0.05 });
+				}
+				return { swing, $draw: { boxes, segs } };
+			}, shapes()),
+		custom('ursi', 'URSI', 'Ultimate RSI', '얼티밋 RSI', 'ultimate rsi luxalgo augmented rsi', 'LuxAlgo', false, 'osc',
+			[length(14), num('signal', '시그널 (EMA)', 14)],
+			[colored('ursi', 'Ultimate RSI'), line('signal', '시그널', '#f59e0b')],
+			(s, p) => {
+				// 구간 최고가·최저가가 새로 바뀌는 봉은 구간 폭 전체를, 아니면 종가 변화를 쓰는 RSI.
+				const top = highest(s.c, p.length);
+				const bottom = lowest(s.c, p.length);
+				const diff = s.c.map((close, i) => {
+					if (i === 0 || top[i] === null || top[i - 1] === null) return null;
+					const span = top[i] - bottom[i];
+					return top[i] > top[i - 1] ? span : bottom[i] < bottom[i - 1] ? -span : close - s.c[i - 1];
+				});
+				const ursi = zip(rma(diff, p.length), rma(map(diff, Math.abs), p.length), (n, d) => (d === 0 ? 50 : n / d * 50 + 50));
+				return { ursi, signal: ema(ursi, p.signal), $colors: { ursi: ursi.map(value => (value === null ? null : value > 80 ? DOWN : value < 20 ? UP : '#c0c0c0')) } };
+			}, { levels: [80, 50, 20] }),
+		custom('divs', 'Divergences', 'Divergence for Many Indicators', '여러 지표 다이버전스', 'divergence many indicators lonesometheblue 다이버전스 rsi macd', 'LonesomeTheBlue', true, 'price',
+			[num('prd', '피벗 좌우 봉 수', 5, 1), num('bars', '비교할 최대 봉 수', 100, 20, 10), num('min', '최소 지표 수', 2, 1), num('hidden', '히든 다이버전스도 (1 켬 · 0 끔)', 0, 0)],
+			[pivotDots('pivot', '피벗', p => -p.prd)],
+			(s, p) => {
+				const macd = zip(ema(s.c, 12), ema(s.c, 26), (fast, slow) => fast - slow);
+				const oscillators = [
+					rsi(s.c, 14), macd, zip(macd, ema(macd, 9), (a, b) => a - b), sma(stochastic(s.c, s.h, s.l, 14), 3),
+					cci(s, 10), change(s.c, 10), obv(s), moneyFlow(s, 14),
+				];
+				const highs = pivots(s.h, p.prd, p.prd, true);
+				const lows = pivots(s.l, p.prd, p.prd, false);
+				const segs = [];
+				// 새 피벗과 그 전의 피벗을 비교해, 가격과 반대로 움직인 지표 수를 센다. 두 점 사이를 봉이 가로지르면 버린다.
+				const scan = (points, price, bull) => {
+					for (let k = 1; k < points.length; k++) {
+						const a = points[k];
+						for (let m = k - 1; m >= 0 && a - points[m] <= p.bars; m--) {
+							const b = points[m];
+							for (const hidden of p.hidden >= 1 ? [false, true] : [false]) {
+								const priceOk = bull ? (hidden ? price[a] > price[b] : price[a] < price[b]) : (hidden ? price[a] < price[b] : price[a] > price[b]);
+								if (!priceOk) continue;
+								const count = oscillators.filter(x => x[a] !== null && x[b] !== null
+									&& (bull ? (hidden ? x[a] < x[b] : x[a] > x[b]) : (hidden ? x[a] > x[b] : x[a] < x[b]))).length;
+								if (count < p.min) continue;
+								let clear = true;
+								for (let j = b + 1; j < a && clear; j++) {
+									const onLine = price[b] + (price[a] - price[b]) * (j - b) / (a - b);
+									clear = bull ? s.l[j] >= onLine : s.h[j] <= onLine;
+								}
+								if (clear) segs.push({ a: b, pa: price[b], b: a, pb: price[a], color: bull ? 'up' : 'down', width: 2, dash: hidden ? [4, 3] : [], text: `${ count }`, textUp: !bull });
+							}
+						}
+					}
+				};
+				const at = x => x.map((value, i) => (value === null ? null : i - p.prd)).filter(i => i !== null && i >= 0);
+				scan(at(lows), s.l, true);
+				scan(at(highs), s.h, false);
+				const pivot = highs.map((value, i) => value ?? lows[i]);
+				return { pivot, $draw: { segs: segs.slice(-60) } };
+			}, shapes()),
+		custom('sqzpro', 'SQZPRO', 'Squeeze PRO', '스퀴즈 프로', 'squeeze pro makit0 ttm 볼린저 켈트너 3단계 수축', 'Makit0 (John Carter)', false, 'price',
+			[length(20), num('bbMult', 'BB 승수', 2, 0.1, 0.1), num('high', '강한 수축 KC 승수', 1, 0.1, 0.1), num('mid', '중간 수축 KC 승수', 1.5, 0.1, 0.1), num('low', '약한 수축 KC 승수', 2, 0.1, 0.1)],
+			[hist('momentum', '모멘텀'), { k: 'state', label: '수축', type: 'dots', color: '#22c55e', fixedColor: true }],
+			(s, p) => {
+				const basis = sma(s.c, p.length);
+				const dev = stdev(s.c, p.length);
+				const range = sma(trueRange(s), p.length);
+				const mid = zip(midpoint(s, p.length), basis, (a, b) => (a + b) / 2);
+				const momentum = linreg(s.c.map((close, i) => (mid[i] === null ? null : close - mid[i])), p.length);
+				// 볼린저 밴드 폭이 켈트너 채널(승수가 작을수록 좁음) 안으로 얼마나 깊이 들어왔는지로 수축 단계를 나눈다.
+				const stateColors = basis.map((m, i) => {
+					if (m === null || range[i] === null) return null;
+					const width = p.bbMult * dev[i];
+					return width <= p.high * range[i] ? '#f97316' : width <= p.mid * range[i] ? '#ef4444' : width <= p.low * range[i] ? '#6b7280' : '#22c55e';
+				});
+				return {
+					momentum, state: stateColors.map(color => (color === null ? null : 0)),
+					$colors: { momentum: fourColors(momentum, ['#00bcd4', '#1e88e5', '#ef4444', '#facc15']), state: stateColors },
+				};
+			}),
+	];
+	customDefs.push(...communityDefs);
+
 	function source(bars) {
 		const s = { n: bars.length, t: [], o: [], h: [], l: [], c: [], v: [], hl2: [], hlc3: [] };
 		for (const bar of bars) {
