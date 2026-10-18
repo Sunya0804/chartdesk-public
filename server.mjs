@@ -430,7 +430,8 @@ async function upstreamError(upstream) {
   try {
     const body = JSON.parse(text);
     const error = Array.isArray(body) ? body[0]?.error : body.error;
-    return (typeof error === "string" ? error : error?.message) ?? text.slice(0, 300);
+    // 디스코드는 오류를 error가 아니라 message에 담는다.
+    return (typeof error === "string" ? error : error?.message) ?? (typeof body.message === "string" ? body.message : null) ?? text.slice(0, 300);
   } catch {
     return text.slice(0, 300) || upstream.statusText;
   }
@@ -564,6 +565,183 @@ const extendedFeed = await import("./local/tv-feed.mjs").catch((error) => {
   throw error;
 });
 
+// ---------- 메시지 알림 (텔레그램, 디스코드) ----------
+// 가격·조건 알림이 울리면 화면이 /api/notify/send로 보내고, 서버가 사용자의 텔레그램 봇이나 디스코드 웹후크로 전달한다.
+// 봇 토큰과 웹후크 주소는 AI 키와 같은 파일(ai-keys.json의 notify)에만 두고 화면으로 돌려보내지 않는다.
+// 주소는 시험용 서버로 바꿀 수 있다.
+const TELEGRAM_BASE = process.env.CHARTDESK_TELEGRAM_BASE ?? "https://api.telegram.org";
+const DISCORD_BASES = process.env.CHARTDESK_DISCORD_BASE ? [process.env.CHARTDESK_DISCORD_BASE] : ["https://discord.com", "https://discordapp.com"];
+const TELEGRAM_TOKEN = /^\d{5,}:[A-Za-z0-9_-]{30,}$/;
+// 알림이 한꺼번에 쏟아져도 메시지 서비스에서 막히지 않게 1분에 보낼 수 있는 수를 제한한다.
+const NOTIFY_PER_MINUTE = 20;
+let notifySent = [];
+
+const notifyOf = (keys) => (keys.notify && typeof keys.notify === "object" ? keys.notify : {});
+const hint = (text) => (text ? `…${text.slice(-4)}` : "");
+const validWebhook = (url) => typeof url === "string" && DISCORD_BASES.some((base) => url.startsWith(`${base}/api/webhooks/`));
+
+function notifyStatus(notify) {
+  const telegram = notify.telegram ?? {};
+  return {
+    telegram: { connected: Boolean(telegram.token && telegram.chatId), token: Boolean(telegram.token), hint: hint(telegram.token), chatId: telegram.chatId ?? "", chatName: telegram.chatName ?? "" },
+    discord: { connected: Boolean(notify.discord?.webhook), hint: hint(notify.discord?.webhook) },
+  };
+}
+
+/** 메시지 서비스 하나에 보낸다. 실패하면 사람이 읽을 이유를 던진다. */
+async function deliver(channel, notify, text) {
+  if (channel === "telegram") {
+    const { token, chatId } = notify.telegram;
+    const upstream = await fetch(`${TELEGRAM_BASE}/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await upstream.json().catch(() => ({}));
+    if (!upstream.ok || body.ok === false) throw new Error(body.description ?? `HTTP ${upstream.status}`);
+    return;
+  }
+  const upstream = await fetch(notify.discord.webhook, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ content: text, username: "ChartDesk", allowed_mentions: { parse: [] } }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!upstream.ok) throw new Error(await upstreamError(upstream));
+}
+
+/** 설정된 곳마다 보내고 결과를 { telegram: 'ok' | 'off' | 오류 문장, discord: … }로 돌려준다. */
+async function broadcast(notify, title, body) {
+  const text = `${title ? `${title}\n` : ""}${body}`.slice(0, 1500);
+  const status = notifyStatus(notify);
+  const result = {};
+  await Promise.all(["telegram", "discord"].map(async (channel) => {
+    if (!status[channel].connected) {
+      result[channel] = "off";
+      return;
+    }
+    try {
+      await deliver(channel, notify, text);
+      result[channel] = "ok";
+    } catch (error) {
+      result[channel] = String(error?.message ?? error);
+    }
+  }));
+  return result;
+}
+
+async function handleNotify(req, res, url) {
+  const origin = req.headers.origin;
+  if (origin && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) {
+    sendJson(res, 403, { error: "허용되지 않은 출처입니다" });
+    return;
+  }
+  const keys = await readKeys();
+  const notify = notifyOf(keys);
+  const route = `${req.method} ${url.pathname}`;
+  const save = async () => {
+    keys.notify = notify;
+    await writeFile(keyFile, JSON.stringify(keys, null, 2), { mode: 0o600 });
+  };
+
+  if (route === "GET /api/notify/status") {
+    sendJson(res, 200, notifyStatus(notify));
+    return;
+  }
+
+  // 빈 문자열은 지우기, 보내지 않은 칸은 그대로 둔다.
+  if (route === "POST /api/notify/config") {
+    const body = await readBody(req, 10_000);
+    if (body.telegram && typeof body.telegram === "object") {
+      const { token, chatId } = body.telegram;
+      notify.telegram ??= {};
+      if (typeof token === "string") {
+        const value = token.trim();
+        if (value && !TELEGRAM_TOKEN.test(value)) {
+          sendJson(res, 400, { error: "텔레그램 봇 토큰 모양이 아닙니다 (예: 123456789:AA…)" });
+          return;
+        }
+        // 다른 봇으로 바꾸면 그 봇이 찾은 대화 이름은 맞지 않는다.
+        if (value !== notify.telegram.token) delete notify.telegram.chatName;
+        if (value) notify.telegram.token = value;
+        else delete notify.telegram.token;
+      }
+      if (typeof chatId === "string" || typeof chatId === "number") {
+        const id = String(chatId).trim();
+        if (id && !/^-?\d+$|^@\w{4,}$/.test(id)) {
+          sendJson(res, 400, { error: "채팅 ID는 숫자(또는 @채널이름)입니다" });
+          return;
+        }
+        if (id !== notify.telegram.chatId) delete notify.telegram.chatName;
+        if (id) notify.telegram.chatId = id;
+        else delete notify.telegram.chatId;
+      }
+      if (!notify.telegram.token && !notify.telegram.chatId) delete notify.telegram;
+    }
+    if (body.discord && typeof body.discord === "object" && typeof body.discord.webhook === "string") {
+      const webhook = body.discord.webhook.trim();
+      if (webhook && !validWebhook(webhook)) {
+        sendJson(res, 400, { error: "디스코드 웹후크 주소가 아닙니다 (https://discord.com/api/webhooks/…)" });
+        return;
+      }
+      if (webhook) notify.discord = { webhook };
+      else delete notify.discord;
+    }
+    await save();
+    sendJson(res, 200, notifyStatus(notify));
+    return;
+  }
+
+  // 텔레그램에서 봇에게 아무 메시지나 보낸 뒤 부르면, 가장 최근에 말을 건 대화를 채팅 ID로 저장한다.
+  if (route === "POST /api/notify/telegram/find-chat") {
+    const token = notify.telegram?.token;
+    if (!token) {
+      sendJson(res, 400, { error: "먼저 봇 토큰을 저장하세요" });
+      return;
+    }
+    const upstream = await fetch(`${TELEGRAM_BASE}/bot${token}/getUpdates?limit=50`, { signal: AbortSignal.timeout(10_000) });
+    const body = await upstream.json().catch(() => ({}));
+    if (!upstream.ok || body.ok === false) {
+      sendJson(res, 502, { error: body.description ?? `HTTP ${upstream.status}` });
+      return;
+    }
+    const chats = (body.result ?? []).map((update) => (update.message ?? update.channel_post ?? update.my_chat_member)?.chat).filter(Boolean);
+    const chat = chats[chats.length - 1];
+    if (!chat) {
+      sendJson(res, 404, { error: "봇이 받은 메시지가 없습니다. 텔레그램에서 봇에게 아무 메시지나 보낸 뒤 다시 누르세요" });
+      return;
+    }
+    notify.telegram.chatId = String(chat.id);
+    notify.telegram.chatName = chat.title ?? ([chat.first_name, chat.last_name].filter(Boolean).join(" ") || chat.username || "");
+    await save();
+    sendJson(res, 200, notifyStatus(notify));
+    return;
+  }
+
+  if (route === "POST /api/notify/send" || route === "POST /api/notify/test") {
+    const test = route.endsWith("/test");
+    const body = test ? {} : await readBody(req, 20_000);
+    const message = test ? "ChartDesk 알림이 여기로 옵니다." : typeof body.body === "string" ? body.body.trim() : "";
+    if (!message) {
+      sendJson(res, 400, { error: "보낼 내용이 없습니다" });
+      return;
+    }
+    const now = Date.now();
+    notifySent = notifySent.filter((time) => now - time < 60_000);
+    if (notifySent.length >= NOTIFY_PER_MINUTE) {
+      sendJson(res, 429, { error: "1분에 보낼 수 있는 알림 수를 넘었습니다" });
+      return;
+    }
+    notifySent.push(now);
+    const title = test ? "ChartDesk 테스트" : typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 100) : "ChartDesk 알림";
+    sendJson(res, 200, await broadcast(notify, title, message));
+    return;
+  }
+
+  sendJson(res, 404, { error: "없는 주소입니다" });
+}
+
 // ---------- 접근 확인 ----------
 // 1) 주소(Host)가 이 서버(127.0.0.1·localhost의 이 포트)가 아니면 거절한다. 다른 사이트가 자기 도메인을 127.0.0.1로
 //    돌려 이 서버를 부르는 방법(DNS 리바인딩)을 막는다.
@@ -603,6 +781,15 @@ const server = createServer(async (req, res) => {
       return;
     }
     await proxy(requestUrl.searchParams.get("url") ?? "", res);
+    return;
+  }
+  if (requestUrl.pathname.startsWith("/api/notify/")) {
+    try {
+      await handleNotify(req, res, requestUrl);
+    } catch (error) {
+      if (res.headersSent) res.end();
+      else sendJson(res, 502, { error: String(error?.message ?? error) });
+    }
     return;
   }
   if (requestUrl.pathname.startsWith("/api/ai/")) {

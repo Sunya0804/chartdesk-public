@@ -847,6 +847,54 @@ window.ChartDeskIndicators = (() => {
 	const custom = (id, short, name, ko, tags, by, overlay, fmt, params, plots, calc, extra = {}) =>
 		({ id, short, name, ko, tags, by, group: 'custom', cat: overlay ? '추세' : '모멘텀', overlay, fmt, params, plots, calc, ...extra });
 
+	// 신호는 표시 개수 제한이나 선의 표시 위치와 관계없이, 확인된 봉에 남긴다.
+	const colorFlip = (colors, from, to) => colors.map((color, i) => i > 0 && colors[i - 1] === from && color === to);
+	const colorSignals = key => [
+		['up', '상승 전환', out => colorFlip(out.$colors[key], DOWN, UP)],
+		['down', '하락 전환', out => colorFlip(out.$colors[key], UP, DOWN)],
+	];
+	const markSignals = (up = '매수', down = '매도', breaksOnly = false) => [
+		['up', up, (out, s) => markHits(out.$signalMarks, s.n, 1, breaksOnly)],
+		['down', down, (out, s) => markHits(out.$signalMarks, s.n, -1, breaksOnly)],
+	];
+	function markHits(marks, n, dir, breaksOnly) {
+		const hits = new Array(n).fill(false);
+		for (const mark of marks) {
+			if (mark.i >= 0 && mark.i < n && mark.dir * dir > 0 && (!breaksOnly || mark.text === 'B')) hits[mark.i] = true;
+		}
+		return hits;
+	}
+	const dotSignals = (up, down) => [
+		['up', '매수 점', out => out[up].map(Number.isFinite)],
+		['down', '매도 점', out => out[down].map(Number.isFinite)],
+	];
+	const squeezeReleased = (out, i, pro) => {
+		const colors = out.$colors.state;
+		if (i === 0 || colors[i - 1] == null || colors[i] == null) return false;
+		return pro ? colors[i - 1] !== '#22c55e' && colors[i] === '#22c55e' : colors[i - 1] === '#f59e0b' && colors[i] !== '#f59e0b';
+	};
+	const squeezeSignals = (pro = false) => [
+		['fire', '수축 해제', (out, s) => Array.from({ length: s.n }, (_, i) => squeezeReleased(out, i, pro))],
+		['fireUp', '수축 해제 (위쪽)', (out, s) => Array.from({ length: s.n }, (_, i) => squeezeReleased(out, i, pro) && out.momentum[i] > 0)],
+		['fireDown', '수축 해제 (아래쪽)', (out, s) => Array.from({ length: s.n }, (_, i) => squeezeReleased(out, i, pro) && out.momentum[i] < 0)],
+	];
+	const explosionSignals = () => ['up', 'down'].map(dir => [dir, dir === 'up' ? '상승 폭발' : '하락 폭발', (out, s) => {
+		const strong = i => i >= 0 && [out[dir][i], out.explosion[i], out.dead[i]].every(Number.isFinite)
+			&& out[dir][i] > out.explosion[i] && out.explosion[i] > out.dead[i];
+		return Array.from({ length: s.n }, (_, i) => strong(i) && !strong(i - 1));
+	}]);
+	const divergenceSignals = () => [
+		['up', '상승 다이버전스', 'up', false], ['down', '하락 다이버전스', 'down', false],
+		['hiddenUp', '히든 상승 다이버전스', 'up', true], ['hiddenDown', '히든 하락 다이버전스', 'down', true],
+	].map(([id, label, color, hidden]) => [id, label, (out, s, p) => {
+		const hits = new Array(s.n).fill(false);
+		for (const seg of out.$signalSegs) {
+			const i = seg.b + p.prd;
+			if (i >= 0 && i < s.n && seg.color === color && (seg.dash.length > 0) === hidden) hits[i] = true;
+		}
+		return hits;
+	}]);
+
 	const customDefs = [
 		custom('squeeze', 'SQZMOM', 'Squeeze Momentum Indicator', '스퀴즈 모멘텀', 'squeeze momentum ttm 볼린저 켈트너 수축', 'LazyBear', false, 'price',
 			[length(20, 'BB 기간'), num('bbMult', 'BB 승수', 2, 0.1, 0.1), num('kc', 'KC 기간', 20), num('kcMult', 'KC 승수', 1.5, 0.1, 0.1)],
@@ -868,7 +916,7 @@ window.ChartDeskIndicators = (() => {
 				const stateColors = basis.map((mid, i) => (mid === null || range[i] === null || mean[i] === null ? null
 					: mid - p.bbMult * dev[i] > mean[i] - p.kcMult * range[i] && mid + p.bbMult * dev[i] < mean[i] + p.kcMult * range[i] ? '#f59e0b' : '#6b7280'));
 				return { momentum, state, $colors: { momentum: colors, state: stateColors } };
-			}),
+			}, { signals: squeezeSignals() }),
 		custom('wavetrend', 'WT', 'WaveTrend Oscillator', '웨이브트렌드', 'wavetrend wt 과매수 과매도', 'LazyBear', false, 'osc',
 			[num('channel', '채널 기간', 10), num('average', '평균 기간', 21)],
 			[hist('diff', '차이'), line('wt1', 'WT1', '#22c55e'), line('wt2', 'WT2', '#ef4444')],
@@ -885,7 +933,7 @@ window.ChartDeskIndicators = (() => {
 			(s, p) => {
 				const result = trailing(s.c, map(atr(s, p.atr), value => value * p.key));
 				return { stop: result.stop, $colors: { stop: result.colors } };
-			}),
+			}, { signals: colorSignals('stop') }),
 		custom('chandelier', 'CE', 'Chandelier Exit', '샹들리에 엑시트', 'chandelier exit 추적 손절', 'Chuck LeBeau · Everget', true, 'price',
 			[length(22, 'ATR 기간'), num('mult', '승수', 3, 0.1, 0.1)], [colored('stop', '엑시트')],
 			(s, p) => {
@@ -911,7 +959,7 @@ window.ChartDeskIndicators = (() => {
 					colors[i] = direction === 1 ? UP : DOWN;
 				}
 				return { stop, $colors: { stop: colors } };
-			}),
+			}, { signals: colorSignals('stop') }),
 		custom('ssl', 'SSL', 'SSL Channel', 'SSL 채널', 'ssl channel 추세', 'ErwinBeckers', true, 'price', [length(10)],
 			[line('up', 'SSL 상승', '#22c55e', { width: 2 }), line('down', 'SSL 하락', '#ef4444', { width: 2 })],
 			(s, p) => {
@@ -934,7 +982,7 @@ window.ChartDeskIndicators = (() => {
 				const half = wma(s.c, Math.max(1, Math.floor(p.length / 2)));
 				const hull = wma(zip(half, wma(s.c, p.length), (fast, slow) => 2 * fast - slow), Math.max(1, Math.round(Math.sqrt(p.length))));
 				return { hull, $colors: { hull: hull.map((value, i) => (value !== null && hull[i - 2] !== null && i >= 2 && value < hull[i - 2] ? DOWN : UP)) } };
-			}, { axisLabel: true }),
+			}, { signals: colorSignals('hull'), axisLabel: true }),
 		custom('qqe', 'QQE', 'Quantitative Qualitative Estimation', 'QQE', 'qqe rsi 추적', 'Glaz', false, 'osc',
 			[length(14, 'RSI 기간'), num('smooth', 'RSI 평활', 5), num('factor', '승수', 4.236, 0.1, 0.001)],
 			[line('rsi', 'RSI 평활', '#3b82f6', { width: 2 }), line('trail', '추적선', '#f59e0b')],
@@ -980,7 +1028,7 @@ window.ChartDeskIndicators = (() => {
 					if (filter[i - 1] !== null && i > 0 && value !== filter[i - 1]) color = value > filter[i - 1] ? UP : DOWN;
 					return color;
 				}) } };
-			}),
+			}, { signals: colorSignals('filter') }),
 		custom('halftrend', 'HalfTrend', 'HalfTrend', '하프트렌드', 'halftrend half trend 추세', 'Everget', true, 'price', [num('amplitude', '진폭', 2)], [colored('trend', 'HalfTrend')],
 			(s, p) => {
 				const highs = highest(s.h, p.amplitude);
@@ -1022,7 +1070,7 @@ window.ChartDeskIndicators = (() => {
 					colors[i] = trend === 0 ? UP : DOWN;
 				}
 				return { trend: line1, $colors: { trend: colors } };
-			}),
+			}, { signals: colorSignals('trend') }),
 		custom('trendmagic', 'Magic', 'Trend Magic', '트렌드 매직', 'trend magic cci atr', 'KivancOzbilgic', true, 'price',
 			[length(20, 'CCI 기간'), num('atr', 'ATR 기간', 5), num('mult', '승수', 1, 0.1, 0.1)], [colored('magic', 'Trend Magic')],
 			(s, p) => {
@@ -1040,7 +1088,7 @@ window.ChartDeskIndicators = (() => {
 					colors[i] = rising1 ? UP : DOWN;
 				}
 				return { magic, $colors: { magic: colors } };
-			}),
+			}, { signals: colorSignals('magic') }),
 		custom('vixfix', 'WVF', 'Williams Vix Fix', '윌리엄스 빅스 픽스', 'vix fix 바닥 공포', 'Larry Williams · ChrisMoody', false, 'osc',
 			[length(22, '기간'), num('band', '밴드 기간', 20), num('mult', '밴드 승수', 2, 0.1, 0.1), num('look', '백분위 기간', 50)],
 			[hist('wvf', 'WVF'), line('upper', '상단 밴드', '#3b82f6')],
@@ -1065,7 +1113,7 @@ window.ChartDeskIndicators = (() => {
 				}
 				const coral = s.c.map((unused, i) => -f * f * f * stages[5][i] + 3 * (f * f + f * f * f) * stages[4][i] - 3 * (2 * f * f + f + f * f * f) * stages[3][i] + (3 * f + 1 + f * f * f + 3 * f * f) * stages[2][i]);
 				return { coral, $colors: { coral: rising(coral) } };
-			}),
+			}, { signals: colorSignals('coral') }),
 		custom('stc', 'STC', 'Schaff Trend Cycle', '샤프 트렌드 사이클', 'schaff trend cycle', 'Doug Schaff', false, 'osc',
 			[num('cycle', '사이클', 10), num('fast', '단기', 23), num('slow', '장기', 50)], [line('stc', 'STC', '#ef4444', { width: 2 })],
 			(s, p) => {
@@ -1090,7 +1138,7 @@ window.ChartDeskIndicators = (() => {
 					return sum / norm;
 				});
 				return { estimate, $colors: { estimate: rising(estimate) } };
-			}),
+			}, { signals: colorSignals('estimate') }),
 		custom('impulsemacd', 'IMACD', 'Impulse MACD', '임펄스 MACD', 'impulse macd 횡보 제거', 'LazyBear', false, 'price',
 			[length(34, 'MA 기간'), num('signal', '시그널', 9)], [hist('impulse', '임펄스'), line('signal', '시그널', '#f97316')],
 			(s, p) => {
@@ -1125,9 +1173,14 @@ window.ChartDeskIndicators = (() => {
 			[length(14, '기간'), num('mult', '승수', 1, 0.1, 0.1)], [colored('alpha', 'AlphaTrend'), line('lagged', '2봉 전', '#787b86')],
 			(s, p) => {
 				const range = average(s, p.length);
-				const hasVolume = s.v.some(volume => volume > 0);
-				// 거래량이 없는 종목은 자금 흐름 대신 RSI로 방향을 본다.
-				const strength = hasVolume ? moneyFlow(s, p.length) : rsi(s.c, p.length);
+				let hasVolume = false;
+				// 그 봉까지 거래량이 없으면 RSI를 쓴다. 뒤에 생긴 거래량으로 과거 신호를 바꾸지 않는다.
+				const flow = moneyFlow(s, p.length);
+				const relative = rsi(s.c, p.length);
+				const strength = s.v.map((volume, i) => {
+					hasVolume ||= volume > 0;
+					return hasVolume ? flow[i] : relative[i];
+				});
 				const alpha = blank(s.n);
 				let previous = null;
 				for (let i = 0; i < s.n; i++) {
@@ -1139,12 +1192,13 @@ window.ChartDeskIndicators = (() => {
 				}
 				const lagged = lag(alpha, 2);
 				return { alpha, lagged, $colors: { alpha: alpha.map((value, i) => (value !== null && lagged[i] !== null && value < lagged[i] ? DOWN : UP)) } };
-			}),
+			}, { signals: colorSignals('alpha') }),
 		custom('ott', 'OTT', 'Optimized Trend Tracker', '옵티마이즈드 트렌드 트래커', 'ott optimized trend tracker', 'Anıl Özekşi · KivancOzbilgic', true, 'price',
-			[length(2, '기간'), num('percent', '퍼센트', 1.4, 0.1, 0.1)], [line('ott', 'OTT', '#a855f7', { width: 2 }), line('support', '지지선', '#3b82f6')],
+			[length(2, '기간'), num('percent', '퍼센트', 1.4, 0.1, 0.1)], [colored('ott', 'OTT'), line('support', '지지선', '#3b82f6')],
 			(s, p) => {
 				const support = vidya(s.c, p.length);
 				const ott = blank(s.n);
+				const colors = blank(s.n);
 				let long = null;
 				let short = null;
 				let direction = 1;
@@ -1158,11 +1212,12 @@ window.ChartDeskIndicators = (() => {
 					short = value < previousShort ? Math.min(value + offset, previousShort) : value + offset;
 					if (direction === -1 && value > previousShort) direction = 1;
 					else if (direction === 1 && value < previousLong) direction = -1;
+					colors[i] = direction === 1 ? UP : DOWN;
 					const stop = direction === 1 ? long : short;
 					ott[i] = value > stop ? stop * (200 + p.percent) / 200 : stop * (200 - p.percent) / 200;
 				}
-				return { ott: lag(ott, 2), support };
-			}),
+				return { ott: lag(ott, 2), support, $colors: { ott: lag(colors, 2) } };
+			}, { signals: colorSignals('ott') }),
 		custom('ribbon', 'Ribbon', 'EMA Ribbon', 'EMA 리본', 'ema ribbon 리본 이평 다발', '여러 사람이 쓰는 방식', true, 'price', [length(20, '시작 기간'), num('step', '간격', 5)],
 			['#f59e0b', '#f97316', '#ef4444', '#ec4899', '#a855f7', '#6366f1', '#3b82f6', '#06b6d4'].map((color, i) => line(`e${ i }`, `EMA ${ i + 1 }`, color)),
 			(s, p) => Object.fromEntries(Array.from({ length: 8 }, (unused, i) => [`e${ i }`, ema(s.c, p.length + p.step * i)]))),
@@ -2125,7 +2180,7 @@ window.ChartDeskIndicators = (() => {
 			num('plan', '진입·목표선 표시 (1 켬 · 0 끔)', 1, 0, 1),
 		],
 		[line('move', '7일 변동폭 %', '#f5a623', { width: 2 }), hist('three', '3일 등락 %')],
-		wonyoRegime, { draw: drawWonyo, group: 'personal', levels: [15, 7] }));
+		wonyoRegime, { draw: drawWonyo, drawSeriesKeys: ['upper', 'lower', 'top', 'bottom'], group: 'personal', levels: [15, 7] }));
 
 	// ---------- 커스텀 지표: TradingView 인기 공개 스크립트 ----------
 	// 위와 같이 공개된 계산식을 다시 구현한 것이다. 원본은 TradingView 공개 라이브러리에서 좋아요·부스트가 많은 오픈 소스 지표다.
@@ -2289,7 +2344,7 @@ window.ChartDeskIndicators = (() => {
 				const cross = bars.map((value, i) => (value !== null && bars[i - 1] !== null && i > 0 && Math.sign(value) !== Math.sign(bars[i - 1]) ? macd[i] : null));
 				const side = bars.map(value => (value === null ? null : value >= 0 ? UP : DOWN));
 				return { hist: bars, macd, signal, cross, $colors: { hist: fourColors(bars), macd: side, cross: side } };
-			}, { levels: [0] }),
+			}, { signals: [['up', '상승 교차', out => out.cross.map((value, i) => Number.isFinite(value) && out.$colors.cross[i] === UP)], ['down', '하락 교차', out => out.cross.map((value, i) => Number.isFinite(value) && out.$colors.cross[i] === DOWN)]], levels: [0] }),
 		custom('bbrsi', 'BB+RSI', 'Bollinger + RSI, Double Strategy', '볼린저 + RSI 이중 전략', 'bollinger rsi double strategy chartart 매수 매도', 'ChartArt', true, 'price',
 			[num('rsi', 'RSI 기간', 6), num('level', 'RSI 기준선', 50), length(200, 'BB 기간'), num('mult', 'BB 승수', 2, 0.1, 0.1)],
 			[line('basis', '중심선', '#f59e0b'), line('upper', '상단', '#ef4444'), line('lower', '하단', '#22c55e')],
@@ -2306,8 +2361,8 @@ window.ChartDeskIndicators = (() => {
 					if (crossUp(strength, level, i) && crossUp(s.c, lower, i)) marks.push({ i, price: s.l[i], dir: 1, text: '매수' });
 					if (crossDown(strength, level, i) && crossDown(s.c, upper, i)) marks.push({ i, price: s.h[i], dir: -1, text: '매도' });
 				}
-				return { basis, upper, lower, $draw: { marks: marks.slice(-200) } };
-			}, shapes()),
+				return { basis, upper, lower, $signalMarks: marks, $draw: { marks: marks.slice(-200) } };
+			}, shapes({ signals: markSignals('매수', '매도') })),
 		custom('cmultma', 'CM MA', 'CM_Ultimate_MA_MTF_V2', 'CM 얼티밋 이동평균', 'cm ultimate ma chrismoody 이평 색 기울기', 'ChrisMoody', true, 'price',
 			[num('type', `종류 (${ MA_TYPES })`, 1), length(20), num('back', '기울기 비교 봉 수', 2), num('type2', '두 번째 선 종류 (0 = 끔)', 0, 0), num('length2', '두 번째 선 기간', 50)],
 			[colored('ma', '이동평균'), colored('ma2', '두 번째 선', 1)],
@@ -2315,7 +2370,7 @@ window.ChartDeskIndicators = (() => {
 				const ma = movingBy(p.type, s, s.c, p.length);
 				const ma2 = p.type2 >= 1 ? movingBy(p.type2, s, s.c, p.length2) : blank(s.n);
 				return { ma, ma2, $colors: { ma: slopeColors(ma, p.back), ma2: slopeColors(ma2, p.back) } };
-			}, { axisLabel: true }),
+			}, { signals: colorSignals('ma'), axisLabel: true }),
 		custom('tma', 'TMA', 'TMA Overlay', 'TMA 오버레이', 'tma overlay smma 21 50 100 200 장악형 engulfing arty', 'ArtyFXC', true, 'price',
 			[num('one', '1번 기간', 21), num('two', '2번 기간', 50), num('three', '3번 기간', 100), num('four', '4번 기간', 200), num('engulf', '장악형 캔들 표시 (1 켬 · 0 끔)', 1, 0)],
 			[line('one', 'SMMA 1', '#e5e7eb'), line('two', 'SMMA 2', '#22c55e'), line('three', 'SMMA 3', '#f59e0b'), line('four', 'SMMA 4', '#ef4444', { width: 2 })],
@@ -2327,8 +2382,8 @@ window.ChartDeskIndicators = (() => {
 						if (s.c[i] < s.o[i] && s.o[i - 1] < s.c[i - 1] && s.c[i] <= s.o[i - 1] && s.o[i] >= s.c[i - 1]) marks.push({ i, price: s.h[i], dir: -1 });
 					}
 				}
-				return { one: rma(s.c, p.one), two: rma(s.c, p.two), three: rma(s.c, p.three), four: rma(s.c, p.four), $draw: { marks: marks.slice(-300) } };
-			}, shapes()),
+				return { one: rma(s.c, p.one), two: rma(s.c, p.two), three: rma(s.c, p.three), four: rma(s.c, p.four), $signalMarks: marks, $draw: { marks: marks.slice(-300) } };
+			}, shapes({ signals: markSignals('상승 장악형', '하락 장악형') })),
 		custom('srbreaks', 'S/R Breaks', 'Support and Resistance Levels with Breaks', '지지·저항 돌파', 'support resistance levels breaks luxalgo 지지 저항 돌파 거래량', 'LuxAlgo', true, 'price',
 			[num('left', '왼쪽 봉 수', 15), num('right', '오른쪽 봉 수', 15), num('volume', '거래량 오실레이터 기준 (%)', 20, 0)],
 			[line('resistance', '저항', '#ef4444', { width: 2, shift: p => -(p.right + 1) }), line('support', '지지', '#3b82f6', { width: 2, shift: p => -(p.right + 1) })],
@@ -2350,8 +2405,8 @@ window.ChartDeskIndicators = (() => {
 						else if (loud) marks.push({ i, price: s.h[i], dir: -1, text: 'B' });
 					}
 				}
-				return { resistance, support, $draw: { marks: marks.slice(-200) } };
-			}, shapes()),
+				return { resistance, support, $signalMarks: marks, $draw: { marks: marks.slice(-200) } };
+			}, shapes({ signals: markSignals('상승 돌파', '하락 돌파', true) })),
 		custom('wae', 'WAE', 'Waddah Attar Explosion', '와다 아타르 익스플로전', 'waddah attar explosion wae 폭발 데드존', 'LazyBear', false, 'osc',
 			[num('sensitivity', '민감도', 150), num('fast', 'MACD 단기', 20), num('slow', 'MACD 장기', 40), num('channel', 'BB 기간', 20), num('mult', 'BB 승수', 2, 0.1, 0.1)],
 			[hist('up', '상승 힘'), hist('down', '하락 힘'), line('explosion', '폭발선', '#d2691e', { width: 2 }), line('dead', '데드존', '#3b82f6')],
@@ -2365,7 +2420,7 @@ window.ChartDeskIndicators = (() => {
 				const down = map(t1, value => (value < 0 ? -value : 0));
 				const grow = (x, strong, weak) => x.map((value, i) => (value === null ? null : value >= (x[i - 1] ?? 0) ? strong : weak));
 				return { up, down, explosion, dead, $colors: { up: grow(up, UP, UP_SOFT), down: grow(down, DOWN, DOWN_SOFT) } };
-			}),
+			}, { signals: explosionSignals() }),
 		custom('cipherb', 'Cipher B', 'VuManChu Cipher B', '뷰만추 사이퍼 B', 'vumanchu cipher b market cipher wavetrend money flow 매수 점', 'vumanchu', false, 'osc',
 			[num('channel', 'WT 채널 기간', 9), num('average', 'WT 평균 기간', 12), num('ma', 'WT2 기간', 3), num('flow', '자금 흐름 기간', 60), num('ob', '과매수', 53), num('os', '과매도 (음수로 씀)', 53)],
 			[hist('flow', '자금 흐름'), line('wt1', 'WT1', '#90caf9', { width: 2 }), line('wt2', 'WT2', '#3949ab'),
@@ -2386,7 +2441,7 @@ window.ChartDeskIndicators = (() => {
 					if (diff[i] < 0 && wt2[i] >= p.ob) sell[i] = wt2[i];
 				}
 				return { flow, wt1, wt2, buy, sell, $colors: { flow: signed(flow) } };
-			}, { levels: [60, 53, 0, -53, -60] }),
+			}, { signals: dotSignals('buy', 'sell'), levels: [60, 53, 0, -53, -60] }),
 		custom('ppst', 'PPST', 'Pivot Point SuperTrend', '피벗 포인트 슈퍼트렌드', 'pivot point supertrend lonesometheblue 피벗 추세', 'LonesomeTheBlue', true, 'price',
 			[num('prd', '피벗 좌우 봉 수', 2), num('factor', 'ATR 승수', 3, 0.1, 0.1), num('atr', 'ATR 기간', 10)],
 			[colored('trail', 'PPST'), line('center', '피벗 중심선', '#3b82f6')],
@@ -2417,7 +2472,7 @@ window.ChartDeskIndicators = (() => {
 					centerLine[i] = center;
 				}
 				return { trail, center: centerLine, $colors: { trail: colors } };
-			}),
+			}, { signals: colorSignals('trail') }),
 		custom('dtr', 'DTR', 'Donchian Trend Ribbon', '돈치안 트렌드 리본', 'donchian trend ribbon lonesometheblue 돈치안 리본 추세', 'LonesomeTheBlue', false, 'osc',
 			[length(20, '기본 기간 (10 이상)')],
 			Array.from({ length: 10 }, (_, i) => line(`r${ i }`, `${ i + 1 }번 줄`, UP, { width: 4, fixedColor: true })),
@@ -2443,7 +2498,7 @@ window.ChartDeskIndicators = (() => {
 					out.$colors[`r${ k }`] = trend.map((value, i) => (main[i] === 1 ? (value === 1 ? UP : UP_SOFT) : main[i] === -1 ? (value === -1 ? DOWN : DOWN_SOFT) : null));
 				}
 				return out;
-			}, { axisLabel: false }),
+			}, { signals: colorSignals('r0'), axisLabel: false }),
 		custom('srchannel', 'S/R 채널', 'Support Resistance Channels', '지지·저항 채널', 'support resistance channels lonesometheblue 지지 저항 채널 매물대', 'LonesomeTheBlue', true, 'price',
 			[num('prd', '피벗 좌우 봉 수', 10, 4), num('width', '채널 최대 폭 (최근 300봉 범위의 %)', 5, 1), num('strength', '최소 세기 (피벗 수)', 1), num('count', '채널 수', 6), num('back', '살펴볼 최근 봉 수', 290, 100, 10)],
 			[pivotDots('pivot', '피벗', p => -p.prd)],
@@ -2537,8 +2592,8 @@ window.ChartDeskIndicators = (() => {
 				const segs = [...lines.down.slice(-30), ...lines.up.slice(-30)];
 				if (top !== null) segs.push({ a: last - p.length, pa: top, b: last, pb: top - slopeHigh * p.length, color: '#ef4444', dash: [4, 3] });
 				if (bottom !== null) segs.push({ a: last - p.length, pa: bottom, b: last, pb: bottom + slopeLow * p.length, color: '#22c55e', dash: [4, 3] });
-				return { pivot: highs.map((value, i) => value ?? lows[i]), $draw: { marks: marks.slice(-200), segs } };
-			}, shapes()),
+				return { pivot: highs.map((value, i) => value ?? lows[i]), $signalMarks: marks, $draw: { marks: marks.slice(-200), segs } };
+			}, shapes({ signals: markSignals('상승 돌파', '하락 돌파', true) })),
 		custom('impulse', 'Impulse', 'Elder Impulse System', '엘더 임펄스 시스템', 'elder impulse system 임펄스 ema macd', 'LazyBear (Alexander Elder)', false, 'price',
 			[num('ema', 'EMA 기간', 13), num('fast', 'MACD 단기', 12), num('slow', 'MACD 장기', 26), num('signal', 'MACD 시그널', 9)],
 			[hist('hist', '임펄스')],
@@ -2554,7 +2609,7 @@ window.ChartDeskIndicators = (() => {
 					return up ? UP : down ? DOWN : '#3b82f6';
 				});
 				return { hist: bars, $colors: { hist: colors } };
-			}, { levels: [0] }),
+			}, { signals: [['up', '초록 전환', out => out.$colors.hist.map((color, i, colors) => i > 0 && colors[i - 1] != null && colors[i - 1] !== UP && color === UP)], ['down', '빨강 전환', out => out.$colors.hist.map((color, i, colors) => i > 0 && colors[i - 1] != null && colors[i - 1] !== DOWN && color === DOWN)]], levels: [0] }),
 		custom('vfi', 'VFI', 'Volume Flow Indicator', '거래량 흐름 지표', 'volume flow indicator vfi 거래량 흐름 katsanos', 'LazyBear (Markos Katsanos)', false, 'osc',
 			[length(130), num('coef', '잡음 기준 계수', 0.2, 0.01, 0.01), num('vcoef', '거래량 상한 배수', 2.5, 0.1, 0.1), num('signal', '시그널', 5)],
 			[hist('diff', '차이'), line('vfi', 'VFI', '#22c55e', { width: 2 }), line('signal', '시그널', '#f97316')],
@@ -2635,7 +2690,7 @@ window.ChartDeskIndicators = (() => {
 			(s, p) => {
 				const t3 = tillson(s.c, p.length, p.factor);
 				return { t3, $colors: { t3: slopeColors(t3) } };
-			}, { axisLabel: true }),
+			}, { signals: colorSignals('t3'), axisLabel: true }),
 		custom('most', 'MOST', 'Moving Stop Loss (MOST)', '무빙 스톱 로스', 'most moving stop loss kivancozbilgic 추적 손절', 'KivancOzbilgic', true, 'price',
 			[length(3, '이동평균 기간 (EMA)'), num('percent', '간격 (%)', 2, 0.1, 0.1)],
 			[line('ma', '이동평균', '#3b82f6'), colored('most', 'MOST')],
@@ -2658,7 +2713,7 @@ window.ChartDeskIndicators = (() => {
 					colors[i] = ma[i] >= most[i] ? UP : DOWN;
 				}
 				return { ma, most, $colors: { most: colors } };
-			}),
+			}, { signals: colorSignals('most') }),
 		custom('ifrsi', 'IFT RSI', 'Inverse Fisher Transform RSI', '역피셔 변환 RSI', 'inverse fisher transform rsi ift ehlers kivancozbilgic', 'KivancOzbilgic (John Ehlers)', false, 'osc',
 			[length(5, 'RSI 기간'), num('smooth', 'WMA 기간', 9)], [colored('ift', 'IFT RSI')],
 			(s, p) => {
@@ -2674,7 +2729,7 @@ window.ChartDeskIndicators = (() => {
 				while (lengths.length < 6) lengths.push(lengths[lengths.length - 1] + lengths[lengths.length - 2]);
 				const mavw = lengths.reduce((x, n) => wma(x, n), s.c);
 				return { mavw, $colors: { mavw: slopeColors(mavw) } };
-			}, { axisLabel: true }),
+			}, { signals: colorSignals('mavw'), axisLabel: true }),
 		custom('vvidya', 'VIDYA', 'Volumatic Variable Index Dynamic Average', '볼륨매틱 VIDYA', 'volumatic vidya bigbeluga 가변 이평 cmo atr 밴드', 'BigBeluga', true, 'price',
 			[length(10, 'VIDYA 기간'), num('momentum', 'CMO 기간', 20), num('band', 'ATR 밴드 배수', 2, 0.1, 0.1)],
 			[colored('trend', 'VIDYA 추세'), line('vidya', 'VIDYA', '#9ca3af')],
@@ -2707,7 +2762,7 @@ window.ChartDeskIndicators = (() => {
 					colors[i] = side === 1 ? UP : DOWN;
 				}
 				return { trend, vidya, $colors: { trend: colors } };
-			}),
+			}, { signals: colorSignals('trend') }),
 		custom('stai', 'ST AI', 'SuperTrend AI (Clustering)', '슈퍼트렌드 AI (군집)', 'supertrend ai clustering kmeans luxalgo 머신러닝 슈퍼트렌드', 'LuxAlgo', true, 'price',
 			[length(10, 'ATR 기간'), num('min', '최소 승수', 1, 0.1, 0.1), num('max', '최대 승수', 5, 0.1, 0.1), num('step', '승수 간격', 0.5, 0.1, 0.1), num('alpha', '성과 기억 기간', 10, 2)],
 			[colored('ts', '슈퍼트렌드'), colored('ama', '적응형 평균', 1)],
@@ -2769,7 +2824,7 @@ window.ChartDeskIndicators = (() => {
 					amaColors[i] = side ? UP_SOFT : DOWN_SOFT;
 				}
 				return { ts, ama, $colors: { ts: tsColors, ama: amaColors } };
-			}),
+			}, { signals: colorSignals('ts') }),
 		custom('twinrf', 'Twin RF', 'Twin Range Filter', '트윈 레인지 필터', 'twin range filter colinmck 매수 매도', 'colinmck', true, 'price',
 			[num('fast', '빠른 기간', 27), num('fastMult', '빠른 승수', 1.6, 0.1, 0.1), num('slow', '느린 기간', 55), num('slowMult', '느린 승수', 2, 0.1, 0.1)],
 			[colored('filter', '필터')],
@@ -2799,8 +2854,8 @@ window.ChartDeskIndicators = (() => {
 					if (short && state === 1) marks.push({ i, price: s.h[i], dir: -1, text: '매도' });
 					state = long ? 1 : short ? -1 : state;
 				}
-				return { filter, $colors: { filter: colors }, $draw: { marks: marks.slice(-200) } };
-			}, shapes()),
+				return { filter, $colors: { filter: colors }, $signalMarks: marks, $draw: { marks: marks.slice(-200) } };
+			}, shapes({ signals: markSignals('매수', '매도') })),
 		custom('slingshot', 'Sling Shot', 'CM Sling Shot System', 'CM 슬링샷 시스템', 'cm sling shot chrismoody ema 38 62 눌림 진입', 'ChrisMoody', true, 'price',
 			[num('fast', '빠른 EMA', 38), num('slow', '느린 EMA', 62)],
 			[colored('fast', '빠른 EMA'), colored('slow', '느린 EMA', 1)],
@@ -2815,8 +2870,8 @@ window.ChartDeskIndicators = (() => {
 					if (fast[i] >= slow[i] && s.c[i] > fast[i] && s.c[i - 1] < fast[i - 1]) marks.push({ i, price: s.l[i], dir: 1 });
 					if (fast[i] < slow[i] && s.c[i] < fast[i] && s.c[i - 1] > fast[i - 1]) marks.push({ i, price: s.h[i], dir: -1 });
 				}
-				return { fast, slow, $colors: { fast: side, slow: side }, $draw: { marks: marks.slice(-200) } };
-			}, shapes()),
+				return { fast, slow, $colors: { fast: side, slow: side }, $signalMarks: marks, $draw: { marks: marks.slice(-200) } };
+			}, shapes({ signals: markSignals('매수', '매도') })),
 		custom('fibbb', 'Fib BB', 'Fibonacci Bollinger Bands', '피보나치 볼린저 밴드', 'fibonacci bollinger bands rashad 피보나치 볼린저', 'Rashad', true, 'price',
 			[length(200), num('mult', '승수', 3, 0.1, 0.1)],
 			[line('basis', '중심 (VWMA)', '#f59e0b', { width: 2 }),
@@ -2869,6 +2924,7 @@ window.ChartDeskIndicators = (() => {
 			[{ k: 'gap', label: '새 갭', type: 'dots', color: '#9ca3af', fixedColor: true }],
 			(s, p) => {
 				const gap = blank(s.n);
+				const signalMarks = [];
 				const colors = blank(s.n);
 				const open = [];
 				const closed = [];
@@ -2889,11 +2945,13 @@ window.ChartDeskIndicators = (() => {
 						open.push({ dir: 1, from: i - 2, top: s.l[i], bottom: s.h[i - 2] });
 						gap[i - 1] = (s.l[i] + s.h[i - 2]) / 2;
 						colors[i - 1] = UP;
+						signalMarks.push({ i, dir: 1 });
 					}
 					if (s.h[i] < s.l[i - 2] && s.c[i - 1] < s.l[i - 2] && (s.l[i - 2] - s.h[i]) / s.h[i] > threshold) {
 						open.push({ dir: -1, from: i - 2, top: s.l[i - 2], bottom: s.h[i] });
 						gap[i - 1] = (s.l[i - 2] + s.h[i]) / 2;
 						colors[i - 1] = DOWN;
+						signalMarks.push({ i, dir: -1 });
 					}
 				}
 				const box = (item, alpha) => ({ from: item.from, to: item.to ?? null, top: item.top, bottom: item.bottom, color: item.dir > 0 ? 'up' : 'down', alpha });
@@ -2902,8 +2960,8 @@ window.ChartDeskIndicators = (() => {
 					...lastOf(open.filter(item => item.dir > 0), p.count).map(item => box(item, 0.2)),
 					...lastOf(open.filter(item => item.dir < 0), p.count).map(item => box(item, 0.2)),
 				];
-				return { gap, $colors: { gap: colors }, $draw: { boxes } };
-			}, shapes()),
+				return { gap, $signalMarks: signalMarks, $colors: { gap: colors }, $draw: { boxes } };
+			}, shapes({ signals: markSignals('상승 갭 확인', '하락 갭 확인') })),
 		custom('liqswings', 'Liquidity', 'Liquidity Swings', '유동성 스윙', 'liquidity swings luxalgo 유동성 스윙 고점 저점 스톱', 'LuxAlgo', true, 'price',
 			[length(14, '스윙 좌우 봉 수'), num('count', '표시할 스윙 수 (방향별)', 5, 1)],
 			[pivotDots('swing', '스윙', p => -p.length)],
@@ -2996,8 +3054,8 @@ window.ChartDeskIndicators = (() => {
 				scan(at(lows), s.l, true);
 				scan(at(highs), s.h, false);
 				const pivot = highs.map((value, i) => value ?? lows[i]);
-				return { pivot, $draw: { segs: segs.slice(-60) } };
-			}, shapes()),
+				return { pivot, $signalSegs: segs, $draw: { segs: segs.slice(-60) } };
+			}, shapes({ signals: divergenceSignals() })),
 		custom('sqzpro', 'SQZPRO', 'Squeeze PRO', '스퀴즈 프로', 'squeeze pro makit0 ttm 볼린저 켈트너 3단계 수축', 'Makit0 (John Carter)', false, 'price',
 			[length(20), num('bbMult', 'BB 승수', 2, 0.1, 0.1), num('high', '강한 수축 KC 승수', 1, 0.1, 0.1), num('mid', '중간 수축 KC 승수', 1.5, 0.1, 0.1), num('low', '약한 수축 KC 승수', 2, 0.1, 0.1)],
 			[hist('momentum', '모멘텀'), { k: 'state', label: '수축', type: 'dots', color: '#22c55e', fixedColor: true }],
@@ -3017,7 +3075,7 @@ window.ChartDeskIndicators = (() => {
 					momentum, state: stateColors.map(color => (color === null ? null : 0)),
 					$colors: { momentum: fourColors(momentum, ['#00bcd4', '#1e88e5', '#ef4444', '#facc15']), state: stateColors },
 				};
-			}),
+			}, { signals: squeezeSignals(true) }),
 	];
 	customDefs.push(...communityDefs);
 

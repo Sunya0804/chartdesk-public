@@ -53,10 +53,10 @@ window.ChartDeskLab = (() => {
 	const GROUP_NAMES = { personal: '개인 지표', custom: '커스텀 지표' };
 
 	/** 지표 고르기. 기술적 지표는 분류별로, 개인·커스텀 지표는 따로 묶는다. */
-	function indicatorSelect(value, onChange) {
+	function indicatorSelect(value, onChange, definitions = RULES.usableDefs()) {
 		const node = el('select', { class: 'ind-pick' });
 		const groups = new Map();
-		for (const def of RULES.usableDefs()) {
+		for (const def of definitions) {
 			const group = GROUP_NAMES[def.group] ?? def.cat;
 			if (!groups.has(group)) groups.set(group, []);
 			groups.get(group).push(def);
@@ -129,10 +129,29 @@ window.ChartDeskLab = (() => {
 		let cond = structuredClone(initial ?? defaultCond());
 		const node = el('div', { class: 'cond' });
 		const render = () => {
-			const kind = select(cond.kind, [['compare', '비교'], ['gosu', 'GOSU 타점 신호']], (value) => {
-				cond = value === 'gosu' ? { kind: 'gosu', signal: 'any' } : defaultCond();
+			const kind = select(cond.kind, [['compare', '비교'], ['gosu', 'GOSU 타점 신호'], ['signal', '지표 신호']], (value) => {
+				const def = RULES.signalDefs()[0];
+				cond = value === 'signal' ? RULES.cleanCond({ kind: 'signal', type: def.id, signal: def.signals[0][0] })
+					: value === 'gosu' ? { kind: 'gosu', signal: 'any' } : defaultCond();
 				render();
 			}, { class: 'cond-kind' });
+			if (cond.kind === 'signal') {
+				const def = IND.byId.get(cond.type);
+				const parts = [kind, indicatorSelect(cond.type, (type) => {
+					const next = IND.byId.get(type);
+					cond = RULES.cleanCond({ kind: 'signal', type, signal: next.signals[0][0] });
+					render();
+				}, RULES.signalDefs()), select(cond.signal, def.signals.map(([id, label]) => [id, label]), (signal) => {
+					cond.signal = signal;
+				})];
+				for (const param of def.params) {
+					parts.push(number(cond.params[param.k], (value) => {
+						cond.params = RULES.cleanParams(def, { ...cond.params, [param.k]: value });
+					}, { class: 'param', title: param.label, 'aria-label': param.label, min: param.min, step: param.step ?? 'any' }));
+				}
+				node.replaceChildren(...parts);
+				return;
+			}
 			if (cond.kind === 'gosu') {
 				node.replaceChildren(kind, select(cond.signal, RULES.GOSU_SIGNALS, (signal) => {
 					cond.signal = signal;
@@ -371,6 +390,7 @@ window.ChartDeskLab = (() => {
 			'{"name": "짧은 이름", "side": "long" 또는 "short", "entry": [조건...], "exit": [조건...], "stopLoss": 손절 %(없으면 0), "takeProfit": 익절 %(없으면 0), "fee": 한 번 거래 수수료 %(모르면 0.1), "period": "3m"|"6m"|"1y"|"2y"|"3y"(말하지 않으면 "1y"), "note": "바꾸거나 뺀 부분이 있으면 한국어로 짧게, 없으면 빈 글"}',
 			'- entry는 모두 맞을 때 진입한다. exit는 하나라도 맞으면 청산한다. 청산 조건이 없으면 [].',
 			'- 조건: {"kind": "compare", "left": 피연산자, "op": "crossUp"(상향 돌파) | "crossDown"(하향 돌파) | "gt"(크다) | "lt"(작다), "right": 피연산자} 또는 {"kind": "gosu", "signal": "any" | "dip" | "roll" | "trend"} (GOSU 지표의 타점 신호)',
+			'- 지표 신호 조건: {"kind":"signal","type":"지표 id","params":{},"signal":"신호 id"}. 아래 signals 목록에 있는 id만 쓴다. 예: {"kind":"signal","type":"utbot","params":{},"signal":"up"}. params는 지표 입력값이며 생략한 값은 기본값을 쓴다.',
 			'- 피연산자: {"kind": "ind", "type": 지표 id, "params": {입력값}, "plot": 선 키} | {"kind": "price", "field": "close" | "open" | "high" | "low" | "volume"} | {"kind": "value", "value": 숫자}',
 			'- 조건은 봉이 마감된 값으로 본다. 아래 목록에 없는 지표 id나 선 키를 지어내지 마라. 표현할 수 없는 부분은 가장 가까운 조건으로 바꾸고 note에 적어라.',
 			'',
@@ -552,6 +572,10 @@ window.ChartDeskLab = (() => {
 		['supertrend', '슈퍼트렌드 위 (상승 추세)', [cmp(close, 'gt', ind('supertrend'))]],
 		['trend200', '200 EMA 위에서 RSI 50 상향 돌파', [cmp(close, 'gt', ind('ema', { length: 200 })), cmp(ind('rsi'), 'crossUp', value(50))]],
 		['gosu', 'GOSU 타점 신호', [{ kind: 'gosu', signal: 'any' }]],
+		['utbot-up', 'UT 봇 상승 전환', [{ kind: 'signal', type: 'utbot', signal: 'up' }]],
+		['cipherb-buy', 'Cipher B 매수 점', [{ kind: 'signal', type: 'cipherb', signal: 'up' }]],
+		['squeeze-up', '스퀴즈 해제 (위쪽)', [{ kind: 'signal', type: 'squeeze', signal: 'fireUp' }]],
+		['stai-up', '슈퍼트렌드 AI 상승 전환', [{ kind: 'signal', type: 'stai', signal: 'up' }]],
 	];
 
 	async function universe(kind) {

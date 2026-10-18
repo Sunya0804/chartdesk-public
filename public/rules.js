@@ -7,6 +7,7 @@
 // 조건(cond)
 //   { kind: 'compare', left, op, right }   op: crossUp(상향 돌파), crossDown(하향 돌파), gt(보다 큼), lt(보다 작음)
 //   { kind: 'gosu', signal: 'any' }        GOSU 지표의 타점 신호 (any, dip 눌림 롱, roll 꺾임 숏, trend 추세 롱)
+//   { kind: 'signal', type: 'utbot', params: {}, signal: 'up' }   커스텀 지표의 확인된 신호
 // 조건은 봉이 마감된 값으로 판단한다. i번째 봉의 조건은 i번째 봉까지의 값만 쓴다.
 window.ChartDeskRules = (() => {
 	'use strict';
@@ -25,6 +26,7 @@ window.ChartDeskRules = (() => {
 	/** 다른 주기의 봉이 필요한 지표(매물대·지지저항)는 조건에 쓰지 않는다. */
 	const usable = def => !def.basis && usablePlots(def).length > 0;
 	const usableDefs = () => IND.defs.filter(usable);
+	const signalDefs = () => IND.defs.filter(def => def.signals?.length > 0);
 
 	function defaultParams(def) {
 		return Object.fromEntries(def.params.map(param => [param.k, param.def]));
@@ -61,6 +63,11 @@ window.ChartDeskRules = (() => {
 	function cleanCond(cond) {
 		if (!cond || typeof cond !== 'object') return null;
 		if (cond.kind === 'gosu') return { kind: 'gosu', signal: GOSU_SIGNALS.some(([id]) => id === cond.signal) ? cond.signal : 'any' };
+		if (cond.kind === 'signal') {
+			const def = IND.byId.get(cond.type);
+			if (!def?.signals?.some(([id]) => id === cond.signal)) return null;
+			return { kind: 'signal', type: def.id, params: cleanParams(def, cond.params), signal: cond.signal };
+		}
 		const left = cleanOperand(cond.left);
 		const right = cleanOperand(cond.right);
 		if (!left || !right || !OPS.some(([id]) => id === cond.op)) return null;
@@ -81,6 +88,10 @@ window.ChartDeskRules = (() => {
 
 	function describe(cond) {
 		if (cond.kind === 'gosu') return `GOSU ${ GOSU_SIGNALS.find(([id]) => id === cond.signal)[1] } 신호`;
+		if (cond.kind === 'signal') {
+			const def = IND.byId.get(cond.type);
+			return `${ def.short } ${ def.signals.find(([id]) => id === cond.signal)[1] }`;
+		}
 		const [left, right] = [operandText(cond.left), operandText(cond.right)];
 		if (cond.op === 'gt') return `${ left } > ${ right }`;
 		if (cond.op === 'lt') return `${ left } < ${ right }`;
@@ -96,6 +107,7 @@ window.ChartDeskRules = (() => {
 	function evaluator(bars, context = {}) {
 		const source = IND.source(bars);
 		const outputs = new Map();
+		const signals = new Map();
 		const n = bars.length;
 
 		const output = (type, params) => {
@@ -134,6 +146,24 @@ window.ChartDeskRules = (() => {
 		/** 조건이 봉마다 맞는지. */
 		const truth = (cond) => {
 			const hits = new Array(n).fill(false);
+			if (cond.kind === 'signal') {
+				const key = `${ cond.type }|${ JSON.stringify(cond.params) }|${ cond.signal }`;
+				if (!signals.has(key)) {
+					try {
+						const def = IND.byId.get(cond.type);
+						const signal = def.signals.find(([id]) => id === cond.signal);
+						const result = signal[2](output(cond.type, cond.params), source, cond.params);
+						if (!Array.isArray(result) || result.length !== n) throw new Error('신호 길이가 맞지 않습니다.');
+						for (let i = 0; i < n; i++) hits[i] = result[i] === true;
+					}
+					catch {
+						// 계산에 실패한 신호는 어느 봉에서도 맞지 않는 것으로 본다.
+						hits.fill(false);
+					}
+					signals.set(key, hits);
+				}
+				return signals.get(key);
+			}
 			if (cond.kind === 'gosu') {
 				const out = output('wonyo', defaultParams(IND.byId.get('wonyo')));
 				for (const signal of out?.$signals ?? []) {
@@ -262,16 +292,17 @@ window.ChartDeskRules = (() => {
 
 	/** AI에게 보낼, 쓸 수 있는 지표 목록. */
 	function catalogText() {
-		return usableDefs().map((def) => {
+		return IND.defs.filter(def => usable(def) || def.signals?.length).map((def) => {
 			const params = def.params.map(param => `${ param.k}=${ param.def }`).join(', ');
 			const plots = usablePlots(def).map(plot => `${ plot.k }(${ plot.label })`).join(', ');
-			return `- ${ def.id }: ${ def.short } ${ def.ko } | params: ${ params || '없음' } | plots: ${ plots }`;
+			const signals = def.signals?.map(([id, label]) => `${ id }(${ label })`).join(', ');
+			return `- ${ def.id }: ${ def.short } ${ def.ko } | params: ${ params || '없음' } | plots: ${ plots || '없음' }${ signals ? ` | signals: ${ signals }` : '' }`;
 		}).join('\n');
 	}
 
 	return {
 		OPS, PRICE_FIELDS, GOSU_SIGNALS,
-		usable, usableDefs, usablePlots, defaultParams, cleanParams, cleanOperand, cleanCond, cleanStrategy,
+		usable, usableDefs, usablePlots, signalDefs, defaultParams, cleanParams, cleanOperand, cleanCond, cleanStrategy,
 		operandText, describe, evaluator, backtest, catalogText,
 	};
 })();

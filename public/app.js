@@ -201,8 +201,8 @@
 		return item;
 	}
 
-	/** 다른 주기의 봉으로 계산해 얹을 수 있는 지표. 화면에 직접 그리는 지표와 선을 옆으로 미는 지표는 뺀다. */
-	const frameable = def => !def.draw && !def.basis && !def.plots.some(plot => typeof plot.shift === 'function');
+	/** 별도 기준 봉을 직접 받는 매물대 지표만 다른 주기 계산에서 뺀다. */
+	const frameable = def => !def.basis;
 
 	function defaultPane(symbol = 'BINANCE:BTCUSDT') {
 		return {
@@ -552,6 +552,23 @@
 			last.close = bar.close;
 		}
 		return out;
+	}
+
+	/** 도형의 봉 번호만 옮긴다. 가격·두께·색·오른쪽 끝(null)은 그대로 둔다. */
+	function mapFrameDraw(data, indexAt, seriesAt, def) {
+		const indexKeys = new Set(def.drawIndexKeys ?? ['i', 'from', 'to', 'a', 'b', 'index', 'start', 'spans']);
+		const seriesKeys = new Set(def.drawSeriesKeys ?? []);
+		const visit = (value, key = '', indices = false) => {
+			if (value === null || value === undefined) return value;
+			const index = indices || indexKeys.has(key);
+			if (Array.isArray(value)) {
+				if (seriesKeys.has(key)) return seriesAt(value);
+				return value.map(item => visit(item, '', index));
+			}
+			if (typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, visit(item, name, index)]));
+			return index && typeof value === 'number' && Number.isFinite(value) ? indexAt(value) : value;
+		};
+		return visit(data);
 	}
 
 	/** 공급원에서 최근 봉 몇 개를 받는다(비교 종목 갱신). */
@@ -1421,6 +1438,7 @@
 
 	function announceAlert(message) {
 		toast(`🔔 ${ message }`);
+		sendNotify(message);
 		if ('Notification' in window && Notification.permission === 'granted') {
 			new Notification('ChartDesk 알림', { body: message });
 		}
@@ -2625,7 +2643,7 @@
 			const value = ind.out[plot.k][i];
 			if (value === null || !Number.isFinite(value)) return null;
 			const count = this.bars.length;
-			const shift = typeof plot.shift === 'function' ? plot.shift(ind.cfg.params) : 0;
+			const shift = !ind.framed && typeof plot.shift === 'function' ? plot.shift(ind.cfg.params) : 0;
 			const target = i + shift;
 			if (target < 0) return null;
 			let time;
@@ -2653,6 +2671,7 @@
 			};
 			for (const ind of this.inds) {
 				const frame = this.frameOf(ind);
+				ind.framed = Boolean(frame);
 				if (frame) {
 					ind.out = this.computeOnFrame(ind, frame, context);
 					continue;
@@ -2671,8 +2690,10 @@
 
 		/** 위 주기의 봉으로 지표를 계산해, 차트의 봉마다 그 봉이 속한 위 주기 봉의 값을 놓는다. */
 		computeOnFrame(ind, frame, context) {
+			ind.framed = true;
 			const count = this.bars.length;
 			const empty = () => Object.fromEntries(ind.def.plots.map(plot => [plot.k, new Array(count).fill(null)]));
+			if (!count) return empty();
 			const basis = basisFor(this.cfg.symbol, frame, this.basisReady);
 			if (!basis.bars?.length) return empty();
 			const merged = mergeFrame(basis.bars, this.bars, frame);
@@ -2690,10 +2711,32 @@
 				map[i] = merged[j].time <= this.bars[i].time ? j : -1;
 			}
 			const mapped = {};
-			for (const plot of ind.def.plots) mapped[plot.k] = map.map(index => (index >= 0 ? out[plot.k]?.[index] ?? null : null));
+			const shifts = new Map(ind.def.plots.map(plot => [plot.k, typeof plot.shift === 'function' ? plot.shift(ind.cfg.params) : 0]));
+			// 먼저 위 주기의 봉 단위로 선을 민 뒤 차트 봉마다 펼친다.
+			const seriesAt = (values, shift = 0) => map.map(index => (index >= 0 ? values?.[index - shift] ?? null : null));
+			for (const plot of ind.def.plots) mapped[plot.k] = seriesAt(out[plot.k], shifts.get(plot.k));
 			if (out.$colors) {
 				mapped.$colors = {};
-				for (const [key, colors] of Object.entries(out.$colors)) mapped.$colors[key] = map.map(index => (index >= 0 ? colors?.[index] : undefined));
+				for (const [key, colors] of Object.entries(out.$colors)) mapped.$colors[key] = seriesAt(colors, shifts.get(key) ?? 0);
+			}
+			if (out.$draw) {
+				const chartSeconds = INTERVAL_SECONDS[this.cfg.interval];
+				const frameSeconds = INTERVAL_SECONDS[frame];
+				const indexAt = (index) => {
+					const time = index < 0 ? merged[0].time + index * frameSeconds
+						: index >= merged.length ? merged[merged.length - 1].time + (index - merged.length + 1) * frameSeconds : merged[index].time;
+					if (time < this.bars[0].time) return (time - this.bars[0].time) / chartSeconds;
+					if (time > this.bars[count - 1].time) return count - 1 + (time - this.bars[count - 1].time) / chartSeconds;
+					// 휴장 등으로 시작 시각의 봉이 없으면 그 뒤의 첫 차트 봉에 놓는다.
+					let [left, right] = [0, count];
+					while (left < right) {
+						const middle = Math.floor((left + right) / 2);
+						if (this.bars[middle].time < time) left = middle + 1;
+						else right = middle;
+					}
+					return left;
+				};
+				mapped.$draw = mapFrameDraw(out.$draw, indexAt, seriesAt, ind.def);
 			}
 			return mapped;
 		}
@@ -4087,6 +4130,132 @@
 		input.click();
 	}
 
+	// ---------- 메시지 알림 ----------
+	// 기기별 전송 여부는 동기화와 설정 내보내기에 넣지 않는다.
+	const NOTIFY_DEVICE_KEY = 'chartdesk-notify-device';
+	let notifyEnabled = window.chartdeskApp?.platform !== 'android' && !window.ChartDeskNative;
+	try {
+		const saved = localStorage.getItem(NOTIFY_DEVICE_KEY);
+		if (saved === 'true' || saved === 'false') notifyEnabled = saved === 'true';
+	}
+	catch {
+		// 저장소를 읽지 못하면 이 기기의 기본값을 쓴다.
+	}
+	let notifyStatus = null;
+	let notifyError = '';
+
+	async function notifyRequest(path, body, keepalive = false) {
+		const response = await fetch(`/api/notify/${ path }`, {
+			method: body === undefined ? 'GET' : 'POST',
+			credentials: 'same-origin',
+			...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+			keepalive,
+		});
+		const result = await response.json();
+		if (!response.ok) throw new Error(result.error ?? `HTTP ${ response.status }`);
+		return result;
+	}
+
+	// 알림마다 조회하지 않는다. 설정 저장·채팅 찾기는 응답의 상태로 캐시를 갱신한다.
+	const notifyReady = notifyRequest('status').then((status) => {
+		notifyStatus = status;
+	}).catch((error) => {
+		notifyError = error.message;
+	});
+
+	function sendNotify(message) {
+		if (!notifyEnabled || (!notifyStatus?.telegram?.connected && !notifyStatus?.discord?.connected)) return;
+		notifyRequest('send', { title: '🔔 ChartDesk 알림', body: message }, true).catch(() => {
+			// 메시지 서비스가 실패해도 화면과 소리 알림은 계속 동작한다.
+		});
+	}
+
+	function notifySection() {
+		const status = el('p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
+		const connected = el('p', { class: 'hint' });
+		const chatName = el('p', { class: 'hint' });
+		const token = el('input', { type: 'password', placeholder: '봇 토큰', 'aria-label': '텔레그램 봇 토큰', autocomplete: 'off', spellcheck: 'false' });
+		const chat = el('input', { type: 'text', placeholder: '채팅 ID', 'aria-label': '텔레그램 채팅 ID', autocomplete: 'off', spellcheck: 'false' });
+		const webhook = el('input', { type: 'password', placeholder: '웹후크 주소', 'aria-label': '디스코드 웹후크 주소', autocomplete: 'off', spellcheck: 'false' });
+		let chatEdited = false;
+		chat.addEventListener('input', () => { chatEdited = true; });
+		const enabled = el('input', { type: 'checkbox' });
+		enabled.checked = notifyEnabled;
+		enabled.addEventListener('change', () => {
+			notifyEnabled = enabled.checked;
+			try {
+				localStorage.setItem(NOTIFY_DEVICE_KEY, String(notifyEnabled));
+			}
+			catch {
+				status.textContent = '이 기기의 선택을 저장하지 못했습니다. 앱을 켜 둔 동안은 적용됩니다.';
+			}
+		});
+		const refresh = () => {
+			token.placeholder = notifyStatus?.telegram?.hint ? `저장됨 ${ notifyStatus.telegram.hint }` : '봇 토큰';
+			webhook.placeholder = notifyStatus?.discord?.hint ? `저장됨 ${ notifyStatus.discord.hint }` : '웹후크 주소';
+			if (!chatEdited) chat.value = notifyStatus?.telegram?.chatId ?? '';
+			chatName.textContent = notifyStatus?.telegram?.chatName ? `찾은 대화: ${ notifyStatus.telegram.chatName }` : '';
+			connected.textContent = `텔레그램: ${ notifyStatus?.telegram?.connected ? '연결됨' : '미연결' } · 디스코드: ${ notifyStatus?.discord?.connected ? '연결됨' : '미연결' }`;
+		};
+		const controls = [token, chat, webhook];
+		let busy = false;
+		const action = (text, path, body, after) => {
+			const button = el('button', { class: 'text-btn', text });
+			controls.push(button);
+			button.addEventListener('click', async () => {
+				if (busy) return;
+				busy = true;
+				controls.forEach(control => { control.disabled = true; });
+				status.textContent = '처리 중…';
+				try {
+					await notifyReady;
+					const result = await notifyRequest(path, body());
+					if (path === 'test') status.textContent = `텔레그램: ${ result.telegram } · 디스코드: ${ result.discord }`;
+					else {
+						notifyStatus = result;
+						notifyError = '';
+						after?.();
+						refresh();
+						status.textContent = path.endsWith('find-chat') ? '대화를 찾았습니다.' : '저장했습니다.';
+					}
+				}
+				catch (error) {
+					status.textContent = error.message;
+				}
+				finally {
+					busy = false;
+					controls.forEach(control => { control.disabled = false; });
+				}
+			});
+			return button;
+		};
+		const tokenSave = action('토큰 저장', 'config', () => ({ telegram: token.value.trim() ? { token: token.value.trim() } : {} }), () => { token.value = ''; });
+		const tokenClear = action('토큰 지우기', 'config', () => ({ telegram: { token: '' } }), () => { token.value = ''; });
+		const chatSave = action('채팅 ID 저장', 'config', () => ({ telegram: { chatId: chat.value.trim() } }), () => { chatEdited = false; });
+		const find = action('채팅 찾기', 'telegram/find-chat', () => ({}), () => { chatEdited = false; });
+		const webhookSave = action('웹후크 저장', 'config', () => ({ discord: webhook.value.trim() ? { webhook: webhook.value.trim() } : {} }), () => { webhook.value = ''; });
+		const webhookClear = action('웹후크 지우기', 'config', () => ({ discord: { webhook: '' } }), () => { webhook.value = ''; });
+		const test = action('테스트 보내기', 'test', () => ({}));
+		const box = el('div', { class: 'sync notify' },
+			el('p', { class: 'title', text: '메시지 알림' }),
+			el('label', { class: 'field' }, el('span', { text: '이 기기에서 메시지 보내기' }), enabled),
+			el('p', { class: 'hint', text: 'PC와 휴대폰에 같은 알림이 있으면 메시지가 두 번 갑니다. 보낼 기기에서만 켜세요.' }),
+			el('b', { text: '텔레그램' }),
+			el('p', { class: 'hint', text: "텔레그램 @BotFather로 봇을 만들어 토큰을 넣고, 그 봇에게 아무 메시지나 보낸 뒤 '채팅 찾기'를 누르세요." }),
+			el('div', { class: 'sync-row' }, token, tokenSave, tokenClear),
+			el('div', { class: 'sync-row' }, chat, chatSave, find), chatName,
+			el('b', { text: '디스코드' }),
+			el('p', { class: 'hint', text: '디스코드 채널 설정 → 연동 → 웹후크에서 주소를 복사해 넣으세요.' }),
+			el('div', { class: 'sync-row' }, webhook, webhookSave, webhookClear),
+			connected, el('div', { class: 'sync-row' }, test), status);
+		refresh();
+		notifyReady.then(() => {
+			refresh();
+			if (notifyError && !busy) status.textContent = notifyError;
+		});
+		return box;
+	}
+
 	// ---------- GitHub Gist 동기화 ----------
 	// 설정 파일과 같은 내용을 사용자의 비공개 Gist 하나(chartdesk-settings.json)에 두고 PC와 휴대폰이 같이 쓴다.
 	// 토큰과 동기화 기록은 'chartdesk-sync'에 둔다. 'chartdesk.'로 시작하지 않아 설정 파일과 Gist에는 들어가지 않는다.
@@ -4445,6 +4614,7 @@
 			el('button', { class: 'menu-option', 'data-action': 'import-settings', text: '설정 가져오기', onclick: importSettings }),
 			el('p', { class: 'hint', text: '지표, 작도, 관심종목, 알림, 테마, AI 창 설정을 파일로 옮깁니다. AI API 키는 들어가지 않습니다. 가져오면 지금 설정을 덮어쓰고 화면을 다시 불러옵니다.' }),
 			syncSection(),
+			notifySection(),
 			version,
 			el('button', { class: 'menu-option', 'data-action': 'changelog', text: '업데이트 내역', onclick: () => window.ChartDeskLab?.openChangelog() }),
 		];

@@ -59,6 +59,7 @@ final class LocalServer {
 
     private final AssetManager assets;
     private final SharedPreferences keys;
+    private final SharedPreferences notifyPrefs;
     private final String token;
     private final ExecutorService pool = Executors.newCachedThreadPool();
     private ServerSocket socket;
@@ -67,6 +68,7 @@ final class LocalServer {
     LocalServer(Context context, String token) {
         this.assets = context.getAssets();
         this.keys = context.getSharedPreferences("ai-keys", Context.MODE_PRIVATE);
+        this.notifyPrefs = context.getSharedPreferences("notify", Context.MODE_PRIVATE);
         this.token = token;
     }
 
@@ -237,6 +239,10 @@ final class LocalServer {
         if (request.path.equals("/api/tv/bars")) throw new Failure(404, "장외 거래량 모듈이 없습니다");
         if (request.path.startsWith("/api/ai/")) {
             ai(request, out);
+            return;
+        }
+        if (request.path.startsWith("/api/notify/")) {
+            notify(request, out);
             return;
         }
         throw new Failure(404, "없는 주소입니다");
@@ -541,6 +547,196 @@ final class LocalServer {
         throw new Failure(404, "없는 주소입니다");
     }
 
+    // ---------- 메시지 알림 (텔레그램, 디스코드) ----------
+    // 데스크톱 server.mjs와 같은 주소와 응답. 봇 토큰과 웹후크 주소는 앱 저장소(notify)에만 두고 화면으로 돌려보내지 않는다.
+
+    private static final String TELEGRAM_BASE = "https://api.telegram.org";
+    private static final String[] DISCORD_BASES = { "https://discord.com", "https://discordapp.com" };
+    private static final Pattern TELEGRAM_TOKEN = Pattern.compile("^\\d{5,}:[A-Za-z0-9_-]{30,}$");
+    private static final Pattern CHAT_ID = Pattern.compile("^-?\\d+$|^@\\w{4,}$");
+    // 알림이 한꺼번에 쏟아져도 메시지 서비스에서 막히지 않게 1분에 보낼 수 있는 수를 제한한다.
+    private static final int NOTIFY_PER_MINUTE = 20;
+    private final List<Long> notifySent = new ArrayList<>();
+
+    private static String hint(String text) {
+        return text.isEmpty() ? "" : "…" + text.substring(Math.max(0, text.length() - 4));
+    }
+
+    private static boolean validWebhook(String url) {
+        for (String base : DISCORD_BASES) if (url.startsWith(base + "/api/webhooks/")) return true;
+        return false;
+    }
+
+    private JSONObject notifyStatus() throws JSONException {
+        String token = notifyPrefs.getString("telegramToken", "");
+        String chatId = notifyPrefs.getString("telegramChat", "");
+        String webhook = notifyPrefs.getString("discordWebhook", "");
+        return new JSONObject()
+            .put("telegram", new JSONObject()
+                .put("connected", !token.isEmpty() && !chatId.isEmpty())
+                .put("token", !token.isEmpty())
+                .put("hint", hint(token))
+                .put("chatId", chatId)
+                .put("chatName", notifyPrefs.getString("telegramChatName", "")))
+            .put("discord", new JSONObject().put("connected", !webhook.isEmpty()).put("hint", hint(webhook)));
+    }
+
+    /** JSON을 보내고 응답 코드와 본문을 받는다. */
+    private static String[] postJson(String address, JSONObject body) throws IOException {
+        HttpURLConnection connection = open(address, Collections.<String, String>emptyMap());
+        try {
+            connection.setReadTimeout(10000);
+            connection.setDoOutput(true);
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("content-type", "application/json");
+            try (OutputStream upstream = connection.getOutputStream()) {
+                upstream.write(body.toString().getBytes(StandardCharsets.UTF_8));
+            }
+            int status = connection.getResponseCode();
+            InputStream in = status == 204 ? null : bodyOf(connection);
+            return new String[] { String.valueOf(status), in == null ? "" : new String(readAll(in), StandardCharsets.UTF_8) };
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    /** 텔레그램 응답의 오류 설명(description). 없으면 HTTP 상태. */
+    private static String telegramError(String[] reply) {
+        try {
+            JSONObject body = new JSONObject(reply[1]);
+            if (body.optBoolean("ok", true) && Integer.parseInt(reply[0]) < 400) return null;
+            return body.optString("description", "HTTP " + reply[0]);
+        } catch (JSONException bad) {
+            return Integer.parseInt(reply[0]) < 400 ? null : "HTTP " + reply[0];
+        }
+    }
+
+    /** 설정된 곳마다 보내고 결과를 { telegram: "ok" | "off" | 오류 문장, discord: … }로 돌려준다. */
+    private JSONObject broadcast(String title, String body) throws JSONException {
+        String text = (title.isEmpty() ? "" : title + "\n") + body;
+        if (text.length() > 1500) text = text.substring(0, 1500);
+        JSONObject status = notifyStatus();
+        JSONObject result = new JSONObject();
+        if (!status.getJSONObject("telegram").getBoolean("connected")) result.put("telegram", "off");
+        else {
+            try {
+                String[] reply = postJson(TELEGRAM_BASE + "/bot" + notifyPrefs.getString("telegramToken", "") + "/sendMessage", new JSONObject()
+                    .put("chat_id", notifyPrefs.getString("telegramChat", "")).put("text", text).put("disable_web_page_preview", true));
+                String error = telegramError(reply);
+                result.put("telegram", error == null ? "ok" : error);
+            } catch (IOException error) {
+                result.put("telegram", String.valueOf(error.getMessage()));
+            }
+        }
+        if (!status.getJSONObject("discord").getBoolean("connected")) result.put("discord", "off");
+        else {
+            try {
+                String[] reply = postJson(notifyPrefs.getString("discordWebhook", ""), new JSONObject()
+                    .put("content", text).put("username", "ChartDesk").put("allowed_mentions", new JSONObject().put("parse", new JSONArray())));
+                result.put("discord", Integer.parseInt(reply[0]) < 400 ? "ok" : upstreamError(reply[1]));
+            } catch (IOException error) {
+                result.put("discord", String.valueOf(error.getMessage()));
+            }
+        }
+        return result;
+    }
+
+    private void notify(Request request, OutputStream out) throws IOException, JSONException, Failure {
+        String route = request.method + " " + request.path;
+
+        if (route.equals("GET /api/notify/status")) {
+            sendJson(out, 200, notifyStatus());
+            return;
+        }
+
+        // 빈 문자열은 지우기, 보내지 않은 칸은 그대로 둔다.
+        if (route.equals("POST /api/notify/config")) {
+            JSONObject body = request.json();
+            SharedPreferences.Editor edit = notifyPrefs.edit();
+            JSONObject telegram = body.optJSONObject("telegram");
+            if (telegram != null) {
+                if (telegram.opt("token") instanceof String) {
+                    String token = telegram.getString("token").trim();
+                    if (!token.isEmpty() && !TELEGRAM_TOKEN.matcher(token).matches()) throw new Failure(400, "텔레그램 봇 토큰 모양이 아닙니다 (예: 123456789:AA…)");
+                    // 다른 봇으로 바꾸면 그 봇이 찾은 대화 이름은 맞지 않는다.
+                    if (!token.equals(notifyPrefs.getString("telegramToken", ""))) edit.remove("telegramChatName");
+                    if (token.isEmpty()) edit.remove("telegramToken");
+                    else edit.putString("telegramToken", token);
+                }
+                Object chat = telegram.opt("chatId");
+                if (chat instanceof String || chat instanceof Number) {
+                    String id = String.valueOf(chat).trim();
+                    if (!id.isEmpty() && !CHAT_ID.matcher(id).matches()) throw new Failure(400, "채팅 ID는 숫자(또는 @채널이름)입니다");
+                    if (!id.equals(notifyPrefs.getString("telegramChat", ""))) edit.remove("telegramChatName");
+                    if (id.isEmpty()) edit.remove("telegramChat");
+                    else edit.putString("telegramChat", id);
+                }
+            }
+            JSONObject discord = body.optJSONObject("discord");
+            if (discord != null && discord.opt("webhook") instanceof String) {
+                String webhook = discord.getString("webhook").trim();
+                if (!webhook.isEmpty() && !validWebhook(webhook)) throw new Failure(400, "디스코드 웹후크 주소가 아닙니다 (https://discord.com/api/webhooks/…)");
+                if (webhook.isEmpty()) edit.remove("discordWebhook");
+                else edit.putString("discordWebhook", webhook);
+            }
+            edit.commit();
+            sendJson(out, 200, notifyStatus());
+            return;
+        }
+
+        // 텔레그램에서 봇에게 아무 메시지나 보낸 뒤 부르면, 가장 최근에 말을 건 대화를 채팅 ID로 저장한다.
+        if (route.equals("POST /api/notify/telegram/find-chat")) {
+            String token = notifyPrefs.getString("telegramToken", "");
+            if (token.isEmpty()) throw new Failure(400, "먼저 봇 토큰을 저장하세요");
+            HttpURLConnection connection = open(TELEGRAM_BASE + "/bot" + token + "/getUpdates?limit=50", Collections.<String, String>emptyMap());
+            String[] reply;
+            try {
+                connection.setReadTimeout(10000);
+                reply = new String[] { String.valueOf(connection.getResponseCode()), new String(readAll(bodyOf(connection)), StandardCharsets.UTF_8) };
+            } finally {
+                connection.disconnect();
+            }
+            String error = telegramError(reply);
+            if (error != null) throw new Failure(502, error);
+            JSONArray updates = new JSONObject(reply[1]).optJSONArray("result");
+            JSONObject chat = null;
+            for (int i = 0; updates != null && i < updates.length(); i++) {
+                JSONObject update = updates.getJSONObject(i);
+                JSONObject holder = update.optJSONObject("message");
+                if (holder == null) holder = update.optJSONObject("channel_post");
+                if (holder == null) holder = update.optJSONObject("my_chat_member");
+                if (holder != null && holder.optJSONObject("chat") != null) chat = holder.getJSONObject("chat");
+            }
+            if (chat == null) throw new Failure(404, "봇이 받은 메시지가 없습니다. 텔레그램에서 봇에게 아무 메시지나 보낸 뒤 다시 누르세요");
+            String name = chat.optString("title", "");
+            if (name.isEmpty()) name = (chat.optString("first_name", "") + " " + chat.optString("last_name", "")).trim();
+            if (name.isEmpty()) name = chat.optString("username", "");
+            notifyPrefs.edit().putString("telegramChat", String.valueOf(chat.get("id"))).putString("telegramChatName", name).commit();
+            sendJson(out, 200, notifyStatus());
+            return;
+        }
+
+        if (route.equals("POST /api/notify/send") || route.equals("POST /api/notify/test")) {
+            boolean test = route.endsWith("/test");
+            JSONObject body = test ? new JSONObject() : request.json();
+            String message = test ? "ChartDesk 알림이 여기로 옵니다." : body.opt("body") instanceof String ? body.getString("body").trim() : "";
+            if (message.isEmpty()) throw new Failure(400, "보낼 내용이 없습니다");
+            synchronized (notifySent) {
+                long now = System.currentTimeMillis();
+                while (!notifySent.isEmpty() && now - notifySent.get(0) >= 60_000L) notifySent.remove(0);
+                if (notifySent.size() >= NOTIFY_PER_MINUTE) throw new Failure(429, "1분에 보낼 수 있는 알림 수를 넘었습니다");
+                notifySent.add(now);
+            }
+            String title = test ? "ChartDesk 테스트" : body.optString("title", "").trim();
+            if (!test && title.isEmpty()) title = "ChartDesk 알림";
+            if (title.length() > 100) title = title.substring(0, 100);
+            sendJson(out, 200, broadcast(title, message));
+            return;
+        }
+
+        throw new Failure(404, "없는 주소입니다");
+    }
+
     private static HttpURLConnection open(String address, Map<String, String> headers) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(address).openConnection();
         connection.setConnectTimeout(20000);
@@ -555,6 +751,8 @@ final class LocalServer {
             Object error = ((JSONObject) parsed).opt("error");
             if (error instanceof String) return (String) error;
             if (error instanceof JSONObject && ((JSONObject) error).has("message")) return ((JSONObject) error).getString("message");
+            // 디스코드는 오류를 error가 아니라 message에 담는다.
+            if (((JSONObject) parsed).opt("message") instanceof String) return ((JSONObject) parsed).getString("message");
         } catch (JSONException | ClassCastException ignored) {
         }
         return text.isEmpty() ? "응답 오류" : text.substring(0, Math.min(300, text.length()));
