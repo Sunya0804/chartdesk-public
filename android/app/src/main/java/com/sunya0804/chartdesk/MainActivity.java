@@ -3,6 +3,7 @@ package com.sunya0804.chartdesk;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -15,12 +16,15 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.util.AtomicFile;
 import android.util.Base64;
 import android.view.View;
 import android.view.WindowInsets;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -49,6 +53,10 @@ public class MainActivity extends Activity {
     private static final String ALERTS = "alerts";
 
     private WebView web;
+    private FrameLayout root;
+    private String origin;
+    // 웹뷰 렌더러가 죽으면 새 웹뷰로 다시 띄운다. 계속 죽으면(1분에 3번) 멈춘다.
+    private final java.util.ArrayDeque<Long> rendererDeaths = new java.util.ArrayDeque<>();
     private LocalServer server;
     private Updater updater;
     private ValueCallback<Uri[]> openCallback;
@@ -64,6 +72,13 @@ public class MainActivity extends Activity {
         backupSettings();
         handler.postDelayed(this.watchTick, WATCH_EVERY_MS);
     };
+    // 앱이 뒤에 있으면 웹뷰의 setInterval이 1분에 한 번 정도로 늦춰진다. 알림을 지켜보는 동안에는 앱이 10초마다 화면 스크립트를 불러
+    // 알림에 필요한 시세·조건 확인(window.chartdeskBackgroundTick)을 돌리게 한다. 함수가 없으면 아무 일도 하지 않는다.
+    private static final long BACKGROUND_TICK_MS = 10_000L;
+    private final Runnable backgroundTick = () -> {
+        if (this.web != null && this.watching && !this.visible) this.web.evaluateJavascript("window.chartdeskBackgroundTick && window.chartdeskBackgroundTick()", null);
+        handler.postDelayed(this.backgroundTick, BACKGROUND_TICK_MS);
+    };
     private boolean watching;
     private boolean visible;
     // 설정 백업(android-bridge.js). 웹뷰 저장소는 포트마다 따로라서, 서버가 지난번과 다른 포트로 뜨면 이 백업으로 되돌린다.
@@ -72,7 +87,6 @@ public class MainActivity extends Activity {
     private boolean restoreChecked;
     private String lastBackup;
 
-    @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -87,14 +101,37 @@ public class MainActivity extends Activity {
             finish();
             return;
         }
-        String origin = "http://127.0.0.1:" + port;
+        origin = "http://127.0.0.1:" + port;
         CookieManager.getInstance().setCookie(origin, LocalServer.COOKIE + "=" + token + "; Path=/; SameSite=Strict");
 
         NotificationManager notifications = getSystemService(NotificationManager.class);
         notifications.createNotificationChannel(new NotificationChannel(ALERTS, "가격 알림", NotificationManager.IMPORTANCE_HIGH));
 
         updater = new Updater(this);
-        web = new WebView(this);
+        web = createWebView();
+        // 화면이 상태 표시줄, 내비게이션 바, 키보드 밑으로 들어가지 않게 그만큼 띄운다.
+        root = new FrameLayout(this);
+        root.addView(web);
+        if (Build.VERSION.SDK_INT >= 30) {
+            root.setOnApplyWindowInsetsListener((view, insets) -> {
+                Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                return WindowInsets.CONSUMED;
+            });
+        }
+        setContentView(root);
+        // 뒤로 가기는 화면에 열린 창(백테스트, 팝업, AI 창)부터 닫는다.
+        if (Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
+        }
+        web.loadUrl(origin + "/");
+        handleIntent(getIntent());
+    }
+
+    /** 앱 화면을 띄우는 웹뷰. 렌더러가 죽어 다시 만들 때도 쓴다. */
+    @SuppressLint("SetJavaScriptEnabled")
+    private WebView createWebView() {
+        WebView web = new WebView(this);
         web.setBackgroundColor(getColor(R.color.background));
         WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -116,6 +153,14 @@ public class MainActivity extends Activity {
                 }
                 return true;
             }
+
+            // 휴대폰 메모리가 모자라거나 웹뷰가 업데이트되면 시스템이 렌더러를 끈다. 처리하지 않으면 앱 전체가 함께 꺼져
+            // 앱을 내려 둔 동안 가격 알림 확인도 소리 없이 멈춘다. 새 웹뷰로 화면을 다시 띄운다.
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                recoverRenderer(view);
+                return true;
+            }
         });
         web.setWebChromeClient(new WebChromeClient() {
             @Override
@@ -131,23 +176,27 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
-        // 화면이 상태 표시줄, 내비게이션 바, 키보드 밑으로 들어가지 않게 그만큼 띄운다.
-        FrameLayout root = new FrameLayout(this);
+        return web;
+    }
+
+    private void recoverRenderer(WebView dead) {
+        if (dead != web) return;
+        long now = System.currentTimeMillis();
+        while (!rendererDeaths.isEmpty() && now - rendererDeaths.peekFirst() > 60_000L) rendererDeaths.pollFirst();
+        rendererDeaths.addLast(now);
+        root.removeView(dead);
+        dead.destroy();
+        web = null;
+        if (rendererDeaths.size() > 3) {
+            // 계속 죽으면 다시 띄워도 소용이 없다. 알림 확인 표시를 내리고 앱을 열 때 다시 시도한다.
+            AlertService.stop(this);
+            watching = false;
+            finish();
+            return;
+        }
+        web = createWebView();
         root.addView(web);
-        if (Build.VERSION.SDK_INT >= 30) {
-            root.setOnApplyWindowInsetsListener((view, insets) -> {
-                Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
-                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-                return WindowInsets.CONSUMED;
-            });
-        }
-        setContentView(root);
-        // 뒤로 가기는 화면에 열린 창(백테스트, 팝업, AI 창)부터 닫는다.
-        if (Build.VERSION.SDK_INT >= 33) {
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::handleBack);
-        }
         web.loadUrl(origin + "/");
-        handleIntent(getIntent());
     }
 
     @SuppressWarnings("deprecation")
@@ -174,6 +223,8 @@ public class MainActivity extends Activity {
         if (updater != null) updater.checkIfDue();
         handler.removeCallbacks(watchTick);
         handler.post(watchTick);
+        handler.removeCallbacks(backgroundTick);
+        handler.postDelayed(backgroundTick, BACKGROUND_TICK_MS);
     }
 
     @Override
@@ -217,6 +268,31 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 절전(Doze) 중에는 배터리 최적화 대상 앱의 네트워크와 예약 작업이 막혀 알림이 늦거나 오지 않는다.
+     * 알림 확인을 처음 켤 때 한 번만, ChartDesk를 최적화에서 빼도록 묻는다.
+     */
+    private void askBatteryExemption() {
+        PowerManager power = getSystemService(PowerManager.class);
+        if (power == null || power.isIgnoringBatteryOptimizations(getPackageName())) return;
+        if (getPreferences(MODE_PRIVATE).getBoolean("asked-battery", false) || isFinishing()) return;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("asked-battery", true).apply();
+        new AlertDialog.Builder(this)
+            .setTitle("가격 알림을 놓치지 않게")
+            .setMessage("휴대폰이 절전 중일 때도 켜 둔 알림을 확인하려면 ChartDesk를 배터리 최적화에서 빼야 합니다. "
+                + "빼지 않으면 화면이 꺼진 동안 알림이 늦거나 오지 않을 수 있습니다.\n\n"
+                + "삼성 휴대폰은 설정 → 배터리 → 백그라운드 사용 제한에서 ChartDesk를 '절전 예외 앱'에 넣어 주세요.")
+            .setPositiveButton("최적화에서 빼기", (dialog, which) -> {
+                try {
+                    startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
+                } catch (RuntimeException unsupported) {
+                    startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                }
+            })
+            .setNegativeButton("나중에", null)
+            .show();
+    }
+
     /** 화면에 켜진 알림이 있는지 보고 AlertService를 켜거나 끈다. */
     private void syncAlertService() {
         if (web == null) return;
@@ -227,6 +303,7 @@ public class MainActivity extends Activity {
                 try {
                     AlertService.start(this);
                     watching = true;
+                    askBatteryExemption();
                 } catch (RuntimeException notAllowed) {
                     // 뒤로 간 뒤라 시작이 막히면 다음에 앱을 열 때 다시 시도한다.
                 }
@@ -250,6 +327,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(watchTick);
+        handler.removeCallbacks(backgroundTick);
         AlertService.stop(this);
         if (server != null) server.stop();
         if (updater != null) updater.stop();

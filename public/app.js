@@ -4811,4 +4811,27 @@
 	setInterval(() => panes.forEach(pane => pane.tick()), 1000);
 	setInterval(checkCondAlerts, 15000);
 	setTimeout(checkCondAlerts, 3000);
+
+	// 안드로이드가 타이머 대신 호출한다. 기존 폴링의 알림 종목·간격 제한은 그대로 쓴다.
+	window.chartdeskBackgroundTick = () => {
+		if (!document.hidden) return;
+		for (const [id, poll] of ticker.polls) {
+			if (poll.busy) continue;
+			try {
+				const provider = PROV.byId.get(id);
+				if (provider) Promise.resolve(ticker.poll(provider, poll)).catch(() => {});
+			}
+			catch {
+				// 한 공급원이 실패해도 다른 시세와 조건 알림은 확인한다.
+			}
+		}
+		if (!checkingConds) {
+			try {
+				Promise.resolve(checkCondAlerts()).catch(() => {});
+			}
+			catch {
+				// 앱의 다음 호출에서 다시 확인한다.
+			}
+		}
+	};
 })();

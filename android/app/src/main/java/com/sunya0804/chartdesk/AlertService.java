@@ -10,15 +10,18 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 
 /**
- * 켜진 가격 알림이 있는 동안 띄워 두는 포그라운드 서비스. 하는 일은 없고, 상단에 "가격 알림 확인 중"을 보여 주면서
+ * 켜진 가격 알림이 있는 동안 띄워 두는 포그라운드 서비스. 상단에 "가격 알림 확인 중"을 보여 주면서
  * 앱을 내려도 시스템이 앱(과 그 안의 화면, 알림 확인)을 정리하지 않게 붙잡아 둔다.
+ * 화면이 꺼지면 CPU가 잠들어 시세를 받아도 확인하지 못하므로, 떠 있는 동안 CPU만 깨워 두는 잠금(partial wake lock)을 잡는다.
  * 최근 앱 목록에서 앱을 밀어 닫으면 화면이 사라지므로 이 서비스도 함께 멈춘다.
  */
 public class AlertService extends Service {
     private static final String CHANNEL = "watching";
     private static final int ID = 1001;
+    private PowerManager.WakeLock awake;
 
     static void start(Context context) {
         context.startForegroundService(new Intent(context, AlertService.class));
@@ -43,8 +46,20 @@ public class AlertService extends Service {
             .build();
         if (Build.VERSION.SDK_INT >= 34) startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(ID, notification);
+        if (awake == null) {
+            awake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chartdesk:alerts");
+            awake.setReferenceCounted(false);
+            awake.acquire();
+        }
         // 프로세스가 죽으면 화면도 없으니 다시 살리지 않는다.
         return START_NOT_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        if (awake != null && awake.isHeld()) awake.release();
+        awake = null;
+        super.onDestroy();
     }
 
     @Override

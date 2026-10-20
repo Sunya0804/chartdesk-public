@@ -7,6 +7,9 @@
     <!-- 앱을 내려도 켜 둔 가격 알림을 계속 확인 (AlertService) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 알림을 지켜보는 동안 화면이 꺼져도 CPU를 깨워 두고, 배터리 최적화에서 빼 달라고 물어본다 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 새 버전 APK 설치 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
