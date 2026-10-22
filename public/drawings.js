@@ -39,15 +39,15 @@ window.ChartDeskDrawings = (() => {
 		{ id: 'vline', type: 'vline', name: '수직선', key: 'V', points: 1 },
 		{ id: 'cross', type: 'cross', name: '크로스라인', key: 'C', points: 1 },
 		// 채널
-		{ id: 'channel', type: 'channel', name: '평행 채널', points: 3, style: { fill: 0.12 } },
-		{ id: 'regression', type: 'regression', name: '회귀 추세', points: 2, style: { fill: 0.1, dev: 2 } },
-		{ id: 'flat', type: 'flat', name: '수평 상단/하단', points: 3, style: { fill: 0.12 } },
-		{ id: 'disjoint', type: 'disjoint', name: '평행하지 않은 채널', points: 3, style: { fill: 0.12 } },
+		{ id: 'channel', type: 'channel', name: '평행 채널', points: 3, style: { fill: 0.12, extendLeft: false, extendRight: false } },
+		{ id: 'regression', type: 'regression', name: '회귀 추세', points: 2, style: { fill: 0.1, dev: 2, extendLeft: false, extendRight: false } },
+		{ id: 'flat', type: 'flat', name: '수평 상단/하단', points: 3, style: { fill: 0.12, extendLeft: false, extendRight: false } },
+		{ id: 'disjoint', type: 'disjoint', name: '평행하지 않은 채널', points: 3, style: { fill: 0.12, extendLeft: false, extendRight: false } },
 		// 피치포크
-		{ id: 'pitchfork', type: 'pitchfork', name: '피치포크', points: 3, style: { fill: 0.08, variant: 'standard' } },
-		{ id: 'schiff', type: 'pitchfork', name: '쉬프 피치포크', points: 3, icon: 'pitchfork', style: { fill: 0.08, variant: 'schiff' } },
-		{ id: 'mschiff', type: 'pitchfork', name: '수정 쉬프 피치포크', points: 3, icon: 'pitchfork', style: { fill: 0.08, variant: 'modified' } },
-		{ id: 'inside', type: 'pitchfork', name: '피치포크 안', points: 3, style: { fill: 0.08, variant: 'inside' } },
+		{ id: 'pitchfork', type: 'pitchfork', name: '피치포크', points: 3, style: { fill: 0.08, variant: 'standard', extendLeft: false } },
+		{ id: 'schiff', type: 'pitchfork', name: '쉬프 피치포크', points: 3, icon: 'pitchfork', style: { fill: 0.08, variant: 'schiff', extendLeft: false } },
+		{ id: 'mschiff', type: 'pitchfork', name: '수정 쉬프 피치포크', points: 3, icon: 'pitchfork', style: { fill: 0.08, variant: 'modified', extendLeft: false } },
+		{ id: 'inside', type: 'pitchfork', name: '피치포크 안', points: 3, style: { fill: 0.08, variant: 'inside', extendLeft: false } },
 		// 피보나치
 		{ id: 'fib', type: 'fib', name: '피보나치 되돌림', key: 'F', points: 2, style: { ...FIB_STYLE, extendLeft: false, extendRight: false, showPrices: true }, levels: RETRACE },
 		{ id: 'fibext', type: 'fibext', name: '추세 기반 피보나치 확장', points: 3, style: { ...FIB_STYLE, extendLeft: false, extendRight: false, showPrices: true }, levels: EXTENSION },
@@ -170,11 +170,11 @@ window.ChartDeskDrawings = (() => {
 	const TYPE_FIELDS = {
 		line: ['color', 'width', 'dash', 'extend'],
 		brush: LINE_FIELDS,
-		channel: FILL_FIELDS,
-		flat: FILL_FIELDS,
-		disjoint: FILL_FIELDS,
-		regression: ['color', 'width', 'dash', 'fill', 'dev'],
-		pitchfork: FILL_FIELDS,
+		channel: [...FILL_FIELDS, 'extendLeft', 'extendRight'],
+		flat: [...FILL_FIELDS, 'extendLeft', 'extendRight'],
+		disjoint: [...FILL_FIELDS, 'extendLeft', 'extendRight'],
+		regression: [...FILL_FIELDS, 'dev', 'extendLeft', 'extendRight'],
+		pitchfork: [...FILL_FIELDS, 'extendLeft'],
 		rect: FILL_FIELDS,
 		rotrect: FILL_FIELDS,
 		circle: FILL_FIELDS,
@@ -353,9 +353,15 @@ window.ChartDeskDrawings = (() => {
 		band(c, near, far, mid) {
 			const { style, shape } = c;
 			const corners = [near[0], near[1], far[1], far[0]];
-			shape.paths.push({ ...c.stroke, points: near }, { ...c.stroke, points: far });
-			if (mid) shape.paths.push({ color: style.color, width: 1, dash: 'dashed', points: mid });
-			if (style.fill > 0) shape.fills.push({ color: rgba(style.color, style.fill), points: corners });
+			const stretch = (points) => {
+				const [first, second] = points[0].x <= points[1].x ? points : [points[1], points[0]];
+				return extend(first, second, style.extendLeft, style.extendRight);
+			};
+			const [nearLine, farLine] = [stretch(near), stretch(far)];
+			shape.paths.push({ ...c.stroke, points: nearLine }, { ...c.stroke, points: farLine });
+			if (mid) shape.paths.push({ color: style.color, width: 1, dash: 'dashed', points: stretch(mid) });
+			if (style.fill > 0) shape.fills.push({ color: rgba(style.color, style.fill), points: [nearLine[0], nearLine[1], farLine[1], farLine[0]] });
+			// 채우기를 늘려도 선택과 끌기의 기준 영역은 원래 점 사이로 유지한다.
 			shape.areas.push(corners);
 		},
 
@@ -420,7 +426,7 @@ window.ChartDeskDrawings = (() => {
 			const target = middle(b, p);
 			// '안' 피치포크는 첫 두 점의 가운데에서 시작하되, 기울기는 기본 피치포크와 같다.
 			const base = style.variant === 'inside' ? a : origin;
-			const ray = from => extend(from, shifted(from, target.x - base.x, target.y - base.y), false, true);
+			const ray = from => extend(from, shifted(from, target.x - base.x, target.y - base.y), style.extendLeft, true);
 			const [upper, lower] = [ray(b), ray(p)];
 			if (style.fill > 0) shape.fills.push({ color: rgba(style.color, style.fill), points: [upper[0], upper[1], lower[1], lower[0]] });
 			shape.paths.push({ ...c.stroke, points: [b, p] }, { ...c.stroke, points: ray(origin) }, { ...c.stroke, points: upper }, { ...c.stroke, points: lower });

@@ -407,6 +407,8 @@ kbd { font: inherit; font-size: 11px; color: var(--muted); }
 
 /* 선택한 작도의 빠른 편집 막대 */
 .draw-bar {
+	max-width: calc(100% - 16px);
+	box-sizing: border-box;
 	position: absolute;
 	top: 8px;
 	left: 50%;
@@ -421,6 +423,8 @@ kbd { font: inherit; font-size: 11px; color: var(--muted); }
 	border-radius: 8px;
 	box-shadow: var(--shadow);
 	white-space: nowrap;
+	flex-wrap: wrap;
+	justify-content: center;
 }
 
 .draw-name { color: var(--muted); font-size: 12px; margin-right: 4px; }

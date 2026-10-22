@@ -47,6 +47,8 @@
 		trend: '<path d="M5 14.5L15 5.5"/><circle cx="4" cy="15.5" r="1.6"/><circle cx="16" cy="4.5" r="1.6"/>',
 		ray: '<path d="M5.2 13.8L18 6"/><circle cx="4" cy="14.5" r="1.6"/>',
 		extended: '<path d="M2 15L18 5"/><circle cx="7" cy="11.9" r="1.6"/><circle cx="13" cy="8.1" r="1.6"/>',
+		extendLeft: '<path d="M18 10H2m4-4-4 4 4 4"/><path d="M11 5v10" stroke-dasharray="2 2"/>',
+		extendRight: '<path d="M2 10h16m-4-4 4 4-4 4"/><path d="M9 5v10" stroke-dasharray="2 2"/>',
 		hline: '<path d="M2 10h6.4M11.6 10H18"/><circle cx="10" cy="10" r="1.6"/>',
 		hray: '<path d="M7.6 10H18"/><circle cx="6" cy="10" r="1.6"/>',
 		vline: '<path d="M10 2v6.4M10 11.6V18"/><circle cx="10" cy="10" r="1.6"/>',
@@ -1321,11 +1323,12 @@
 		if (drawing.type === 'hline') return a.p;
 		if (drawing.type === 'hray') return drawing.style.direction === 'left' ? (time <= a.t ? a.p : null) : (time >= a.t ? a.p : null);
 		if (drawing.type !== 'line' || !b || a.t === b.t) return null;
-		const [left, right] = a.t < b.t ? [a, b] : [b, a];
 		const extend = drawing.style.extend ?? 'none';
-		if (time < left.t && extend !== 'both' && extend !== 'left') return null;
-		if (time > right.t && extend === 'none') return null;
-		return left.p + (right.p - left.p) * (time - left.t) / (right.t - left.t);
+		// 0보다 작으면 첫 점 바깥, 1보다 크면 둘째 점 바깥이다. 점을 거꾸로 찍어도 같다.
+		const position = (time - a.t) / (b.t - a.t);
+		if (position < 0 && extend !== 'both' && extend !== 'left') return null;
+		if (position > 1 && extend !== 'both' && extend !== 'right') return null;
+		return a.p + (b.p - a.p) * position;
 	}
 
 	function drawingAlertText(alert) {
@@ -1852,6 +1855,25 @@
 		return false;
 	}
 
+	/** 선의 저장 형식을 유지하면서 좌우 체크와 빠른 토글이 같은 값을 쓰게 한다. */
+	function drawingExtension(drawing, side) {
+		if (drawing.type === 'line' && drawing.points[0].t > drawing.points[1].t) side = side === 'left' ? 'right' : 'left';
+		return DRAW.fieldsOf(drawing).includes('extend')
+			? drawing.style.extend === side || drawing.style.extend === 'both'
+			: drawing.style[side === 'left' ? 'extendLeft' : 'extendRight'] === true;
+	}
+
+	function setDrawingExtension(drawing, side, on) {
+		if (DRAW.fieldsOf(drawing).includes('extend')) {
+			const left = side === 'left' ? on : drawingExtension(drawing, 'left');
+			const right = side === 'right' ? on : drawingExtension(drawing, 'right');
+			const reversed = drawing.type === 'line' && drawing.points[0].t > drawing.points[1].t;
+			const [start, end] = reversed ? [right, left] : [left, right];
+			drawing.style.extend = start ? (end ? 'both' : 'left') : (end ? 'right' : 'none');
+		}
+		else drawing.style[side === 'left' ? 'extendLeft' : 'extendRight'] = on;
+	}
+
 	function rememberDrawingStyle(drawing) {
 		// 글, 이미지, 담아 둔 봉 모양은 그 작도만의 내용이라 기본값으로 남기지 않는다.
 		const { text, image, ratio, pattern, ...style } = drawing.style;
@@ -1957,7 +1979,14 @@
 			if (key === 'color') rows.push(field('색', colorInput(style.color, set('color'))));
 			else if (key === 'width') rows.push(field('굵기', selectInput(style.width, WIDTH_OPTIONS, set('width', Number))));
 			else if (key === 'dash') rows.push(field('선 종류', selectInput(style.dash, DASH_OPTIONS, set('dash'))));
-			else if (key === 'extend') rows.push(field('연장', selectInput(style.extend, [['none', '없음'], ['left', '왼쪽'], ['right', '오른쪽'], ['both', '양쪽']], set('extend'))));
+			else if (key === 'extend') {
+				for (const [side, label] of [['left', '왼쪽으로 연장'], ['right', '오른쪽으로 연장']]) {
+					rows.push(field(label, checkInput(drawingExtension(drawing, side), (on, commit) => {
+						setDrawingExtension(drawing, side, on);
+						apply(commit);
+					})));
+				}
+			}
 			else if (key === 'direction') rows.push(field('방향', selectInput(style.direction, [['right', '오른쪽'], ['left', '왼쪽']], set('direction'))));
 			else if (key === 'extendLeft') rows.push(field('왼쪽으로 연장', checkInput(style.extendLeft, set('extendLeft'))));
 			else if (key === 'fill') {
@@ -3010,6 +3039,22 @@
 					drawing.style.width = Number(width);
 					apply(true);
 				}));
+			}
+			for (const [side, key, title] of [['left', 'extendLeft', '왼쪽으로 연장'], ['right', 'extendRight', '오른쪽으로 연장']]) {
+				if (!fields.includes('extend') && !fields.includes(key)) continue;
+				const button = iconButton(key, title);
+				const refresh = () => {
+					const on = drawingExtension(drawing, side);
+					button.classList.toggle('on', on);
+					button.setAttribute('aria-pressed', String(on));
+				};
+				button.addEventListener('click', () => {
+					setDrawingExtension(drawing, side, !drawingExtension(drawing, side));
+					apply(true);
+					refresh();
+				});
+				refresh();
+				nodes.push(button);
 			}
 			if (fields.length) nodes.push(iconButton('gear', '설정', { onclick: () => openDrawingSettings(this, drawing) }));
 			if (ALERTABLE_DRAWINGS.has(drawing.type)) {
