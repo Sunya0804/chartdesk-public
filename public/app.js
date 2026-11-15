@@ -200,11 +200,38 @@
 		if (typeof saved.axisLabel === 'boolean') item.axisLabel = saved.axisLabel;
 		if (Array.isArray(saved.levels)) item.levels = saved.levels.filter(Number.isFinite);
 		if (typeof saved.tf === 'string' && INTERVAL_SECONDS[saved.tf] && frameable(def)) item.tf = saved.tf;
+		if (typeof saved.companionOf === 'string') item.companionOf = saved.companionOf;
 		return item;
+	}
+
+	/** 세트가 만든 지표만 소유 id로 묶는다. 사용자가 따로 추가한 매물대는 건드리지 않는다. */
+	function syncIndicatorSets(list) {
+		const parents = list.filter(item => IND.byId.get(item.type)?.companions);
+		const parentIds = new Set(parents.map(item => item.id));
+		list = list.filter(item => !item.companionOf || parentIds.has(item.companionOf));
+		for (const parent of parents) {
+			for (const [key, type] of IND.byId.get(parent.type).companions) {
+				const children = list.filter(item => item.companionOf === parent.id && item.type === type);
+				if (!parent.params[key]) { list = list.filter(item => !children.includes(item)); continue; }
+				const child = children[0] ?? newIndicator(type, { companionOf: parent.id });
+				list = list.filter(item => !children.includes(item) || item === child);
+				if (!children.length) list.push(child);
+				child.hidden = Boolean(parent.hidden);
+				if (type === 'bulldanRsi') {
+					child.params = sanitizeParams(IND.byId.get(type), parent.params);
+					delete child.levels;
+					if (parent.tf) child.tf = parent.tf;
+					else delete child.tf;
+				}
+			}
+		}
+		return list;
 	}
 
 	/** 별도 기준 봉을 직접 받는 매물대 지표만 다른 주기 계산에서 뺀다. */
 	const frameable = def => !def.basis;
+	/** 단계 설정을 따르는 기준선은 예전에 저장한 고정값보다 우선한다. */
+	const indicatorLevels = (def, cfg) => typeof def.levels === 'function' ? def.levels(cfg.params) : cfg.levels ?? def.levels ?? [];
 
 	function defaultPane(symbol = 'BINANCE:BTCUSDT') {
 		return {
@@ -222,12 +249,12 @@
 		if (Array.isArray(saved)) {
 			// 저장된 id를 그대로 둔다. 불러올 때마다 바뀌면 설정이 바뀐 것으로 보여 Gist 동기화가 매번 올린다.
 			const ids = new Set();
-			return saved.filter(item => item && IND.byId.has(item.type)).map((item) => {
+			return syncIndicatorSets(saved.filter(item => item && IND.byId.has(item.type)).map((item) => {
 				const indicator = newIndicator(item.type, item);
 				if (typeof item.id === 'string' && item.id && !ids.has(item.id)) indicator.id = item.id;
 				ids.add(indicator.id);
 				return indicator;
-			});
+			}));
 		}
 		// 처음 버전은 켜고 끄는 네 가지 지표만 저장했다.
 		const legacy = saved ?? {};
@@ -1660,7 +1687,7 @@
 		const inSection = def => (section === 'favorite' ? state.favoriteIndicators.includes(def.id) : def.group === section);
 		const render = () => {
 			nav.replaceChildren(...INDICATOR_SECTIONS.map(([id, label]) => {
-				const size = id === 'favorite' ? state.favoriteIndicators.length : IND.defs.filter(def => def.group === id).length;
+				const size = IND.defs.filter(def => !def.setOnly && (id === 'favorite' ? state.favoriteIndicators.includes(def.id) : def.group === id)).length;
 				return el('button', {
 					class: `ind-nav-btn${ id === section ? ' on' : '' }`,
 					'data-section': id,
@@ -1672,7 +1699,7 @@
 			}));
 			const query = normalize(input.value);
 			// 검색어가 있으면 고른 구역과 상관없이 전체에서 찾는다.
-			matches = IND.defs.filter(def => (query ? searchText.get(def.id).includes(query) : inSection(def)));
+			matches = IND.defs.filter(def => !def.setOnly && (query ? searchText.get(def.id).includes(query) : inSection(def)));
 			if (matches.length === 0) {
 				options.replaceChildren(el('p', { class: 'hint', text: query ? '일치하는 지표가 없습니다.'
 					: section === 'favorite' ? '아직 즐겨찾기가 없습니다. 지표 이름 앞의 ☆를 누르면 여기에 모입니다.' : '지표가 없습니다.' }));
@@ -1713,18 +1740,34 @@
 
 	/** 지표는 모든 차트가 함께 쓴다. 바뀌면 저장하고 열려 있는 차트를 모두 다시 그린다. */
 	function indicatorsChanged() {
+		const previous = state.indicators;
+		state.indicators = syncIndicatorSets(state.indicators);
+		for (const item of previous) if (!state.indicators.includes(item)) delete state.paneSizes[item.id];
 		save();
 		panes.forEach(pane => pane.buildIndicators());
 	}
 
 	function openIndicatorSettings(anchor, pane, id) {
-		const item = state.indicators.find(candidate => candidate.id === id);
+		let item = state.indicators.find(candidate => candidate.id === id);
 		if (!item) return;
+		if (item.type === 'bulldanRsi' && item.companionOf) {
+			item = state.indicators.find(candidate => candidate.id === item.companionOf);
+			if (!item) return;
+			id = item.id;
+		}
 		const def = IND.byId.get(item.type);
 		const rows = [el('p', { class: 'title', text: `${ def.short } · ${ def.ko }` })];
 
 		if (def.params.length) rows.push(el('div', { class: 'category', text: '입력값' }));
 		for (const param of def.params) {
+			if (param.type === 'boolean') {
+				rows.push(field(param.label, checkInput(Boolean(item.params[param.k]), value => pane.updateIndicator(id, { ...item.params, [param.k]: Number(value) }))));
+				continue;
+			}
+			if (param.options) {
+				rows.push(field(param.label, selectInput(item.params[param.k], param.options, value => pane.updateIndicator(id, { ...item.params, [param.k]: Number(value) }))));
+				continue;
+			}
 			rows.push(field(param.label, numberInput(item.params[param.k], param, (value, commit) => {
 				if (commit) pane.updateIndicator(id, { ...item.params, [param.k]: value });
 			})));
@@ -1740,18 +1783,21 @@
 				el('p', { class: 'hint', text: '차트보다 긴 주기를 고르면 그 주기의 봉으로 계산해 얹습니다(예: 1시간 차트에 4시간 RSI). 차트 주기가 같거나 더 길면 차트 봉으로 계산합니다.' }));
 		}
 
-		const styled = def.plots.filter(plot => plot.type !== 'hist');
+		// 세트 전용 보조 지표도 같은 설정 창에서 선 스타일을 바꾼다.
+		const styleItems = [item, ...state.indicators.filter(child => child.companionOf === item.id && IND.byId.get(child.type).setOnly)];
+		const styled = styleItems.flatMap(cfg => IND.byId.get(cfg.type).plots.filter(plot => plot.type !== 'hist').map(plot => ({ cfg, plot })));
 		if (styled.length) rows.push(el('div', { class: 'category', text: '스타일' }));
-		for (const plot of styled) {
-			const current = pane.styleOf(item, plot);
+		for (const { cfg, plot } of styled) {
+			const current = pane.styleOf(cfg, plot);
 			const set = key => (value) => {
-				item.style[plot.k] = { ...item.style[plot.k], [key]: value };
+				cfg.style[plot.k] = { ...cfg.style[plot.k], [key]: value };
 				save();
 				panes.forEach(each => each.restyleIndicators());
 			};
-			const controls = [checkInput(!item.style[plot.k]?.hidden, visible => set('hidden')(!visible))];
+			const controls = [checkInput(!cfg.style[plot.k]?.hidden, visible => set('hidden')(!visible))];
 			if (!plot.fixedColor) controls.push(colorInput(current.color, set('color')));
 			if (plot.type === 'line') controls.push(selectInput(current.width, WIDTH_OPTIONS, value => set('width')(Number(value))));
+			controls.forEach((control, i) => control.setAttribute('aria-label', `${ plot.label } ${ ['표시', ...(!plot.fixedColor ? ['색'] : []), '굵기'][i] }`));
 			rows.push(el('div', { class: 'field style-row' }, el('span', { text: plot.label }), ...controls));
 		}
 
@@ -1763,12 +1809,14 @@
 		}
 
 		if (def.levels) {
-			const input = el('input', { type: 'text', value: (item.levels ?? def.levels).join(', ') });
-			input.addEventListener('change', () => {
+			const followsParams = typeof def.levels === 'function';
+			const input = el('input', { type: 'text', value: indicatorLevels(def, item).join(', ') });
+			if (followsParams) input.readOnly = true;
+			else input.addEventListener('change', () => {
 				item.levels = input.value.split(',').map(part => Number(part.trim())).filter(Number.isFinite);
 				indicatorsChanged();
 			});
-			rows.push(el('div', { class: 'category', text: '기준선' }), field('값 (쉼표로 구분)', input));
+			rows.push(el('div', { class: 'category', text: '기준선' }), field(followsParams ? '값 (단계 설정을 따름)' : '값 (쉼표로 구분)', input));
 		}
 
 		rows.push(el('div', { class: 'actions' }, el('button', {
@@ -1780,7 +1828,7 @@
 			text: '기본값으로',
 			onclick: () => {
 				item.params = sanitizeParams(def, {});
-				item.style = {};
+				for (const cfg of styleItems) cfg.style = {};
 				delete item.levels;
 				delete item.tf;
 				delete item.axisLabel;
@@ -2091,7 +2139,7 @@
 				},
 				// 선으로 그릴 수 없는 지표(매물대 등)가 가격 차트 위에 직접 그리는 부분.
 				overlays: () => this.inds
-					.filter(ind => ind.def.draw && ind.out?.$draw && !ind.cfg.hidden)
+					.filter(ind => ind.def.draw && !ind.def.paneDraw && ind.out?.$draw && !ind.cfg.hidden)
 					.map(ind => ({ draw: (context, view) => ind.def.draw(context, view, ind.out.$draw, ind.cfg.params) })),
 			});
 			this.body.classList.toggle('drawing', activeTool !== null);
@@ -2481,8 +2529,17 @@
 		}
 
 		removeIndicator(id) {
-			state.indicators = state.indicators.filter(item => item.id !== id);
-			delete state.paneSizes[id];
+			const item = state.indicators.find(item => item.id === id);
+			const parent = item?.companionOf && state.indicators.find(candidate => candidate.id === item.companionOf);
+			if (parent) {
+				const [key] = IND.byId.get(parent.type).companions.find(([, type]) => type === item.type);
+				parent.params[key] = 0;
+			}
+			state.indicators = state.indicators.filter(item => {
+				if (item.id !== id && item.companionOf !== id) return true;
+				delete state.paneSizes[item.id];
+				return false;
+			});
 			indicatorsChanged();
 		}
 
@@ -2496,6 +2553,7 @@
 		toggleIndicator(id) {
 			const item = state.indicators.find(candidate => candidate.id === id);
 			if (!item) return;
+			if (item.companionOf) { this.removeIndicator(id); return; }
 			item.hidden = !item.hidden;
 			indicatorsChanged();
 		}
@@ -2530,6 +2588,7 @@
 			const muted = cssColors().muted;
 			let nextPane = 1;
 			for (const cfg of state.indicators) {
+				if (cfg.companionOf && cfg.hidden) continue;
 				const def = IND.byId.get(cfg.type);
 				const pane = def.overlay ? 0 : nextPane++;
 				const onBottom = def.scale === 'bottom';
@@ -2552,10 +2611,18 @@
 				}
 				const first = series[def.plots[0].k];
 				if (onBottom) first.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-				for (const price of cfg.levels ?? def.levels ?? []) {
+				for (const price of indicatorLevels(def, cfg)) {
 					first.createPriceLine({ price, color: muted, lineWidth: 1, lineStyle: LC.LineStyle.Dotted, axisLabelVisible: false });
 				}
 				const ind = { cfg, def, pane, series, out: null, values: {}, row: null };
+				if (def.paneDraw) {
+					// 보조 패널 전용 도형은 그 패널의 가격 좌표와 캔버스로 그린다.
+					first.attachPrimitive({ paneViews: () => [{ zOrder: () => 'top', renderer: () => ({ draw: target => target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+						if (cfg.hidden || !ind.out?.$draw) return;
+						def.draw(context, { width: mediaSize.width, height: mediaSize.height, font: cssColors().font, up: cssColors().up, down: cssColors().down,
+							barX: index => this.chart.timeScale().logicalToCoordinate(index), priceY: price => first.priceToCoordinate(price) }, ind.out.$draw, cfg.params);
+					}) }) }] });
+				}
 				this.buildLegendRow(ind);
 				this.inds.push(ind);
 			}
@@ -2588,7 +2655,7 @@
 
 		buildLegendRow(ind) {
 			const { def, cfg } = ind;
-			const args = def.params.map(param => cfg.params[param.k]).join(' ');
+			const args = def.compactLegend ? '' : def.params.map(param => cfg.params[param.k]).join(' ');
 			const frame = this.frameOf(ind);
 			const name = `${ args ? `${ def.short } ${ args }` : def.short }${ frame ? ` · ${ intervalLabel(frame) }` : '' }`;
 			const nodes = [el('span', { class: 'ind-name', text: name })];
@@ -2691,7 +2758,7 @@
 
 		computeIndicators() {
 			const source = IND.source(this.bars);
-			const context = { tzOffset: TZ_OFFSET, symbol: this.cfg.symbol, interval: this.cfg.interval, info: symbolInfo(this.cfg.symbol) };
+			const context = { tzOffset: TZ_OFFSET, symbol: this.cfg.symbol, interval: this.cfg.interval, info: symbolInfo(this.cfg.symbol), closedBefore: Date.now() / 1000 + TZ_OFFSET - INTERVAL_SECONDS[this.cfg.interval] };
 			// 위 주기의 봉이 도착하면 지표를 다시 계산한다.
 			this.basisReady ??= () => {
 				if (this.dead || this.bars.length === 0) return;
@@ -2728,7 +2795,8 @@
 			const merged = mergeFrame(basis.bars, this.bars, frame);
 			let out;
 			try {
-				out = ind.def.calc(IND.source(merged), ind.cfg.params, { ...context, interval: frame });
+				const closedBefore = Number.isFinite(context.closedBefore) ? context.closedBefore + INTERVAL_SECONDS[this.cfg.interval] - INTERVAL_SECONDS[frame] : undefined;
+				out = ind.def.calc(IND.source(merged), ind.cfg.params, { ...context, closedBefore, interval: frame });
 			}
 			catch {
 				return empty();

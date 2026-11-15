@@ -895,6 +895,36 @@ window.ChartDeskIndicators = (() => {
 		return hits;
 	}]);
 
+	/** 확정 피벗 사이의 다이버전스. 가격선을 봉이 가로지르는 후보는 제외한다. */
+	function scanDivergences(s, p, oscillators, highs, lows) {
+		const segs = [];
+		const scan = (points, price, bull) => {
+			for (let k = 1; k < points.length; k++) {
+				const a = points[k];
+				for (let m = k - 1; m >= 0 && a - points[m] <= p.bars; m--) {
+					const b = points[m];
+					for (const hidden of p.hidden >= 1 ? [false, true] : [false]) {
+						const priceOk = bull ? (hidden ? price[a] > price[b] : price[a] < price[b]) : (hidden ? price[a] < price[b] : price[a] > price[b]);
+						if (!priceOk) continue;
+						const count = oscillators.filter(x => x[a] !== null && x[b] !== null
+							&& (bull ? (hidden ? x[a] < x[b] : x[a] > x[b]) : (hidden ? x[a] > x[b] : x[a] < x[b]))).length;
+						if (count < p.min) continue;
+						let clear = true;
+						for (let j = b + 1; j < a && clear; j++) {
+							const onLine = price[b] + (price[a] - price[b]) * (j - b) / (a - b);
+							clear = bull ? s.l[j] >= onLine : s.h[j] <= onLine;
+						}
+						if (clear) segs.push({ a: b, pa: price[b], b: a, pb: price[a], color: bull ? 'up' : 'down', width: 2, dash: hidden ? [4, 3] : [], text: `${ count }`, textUp: !bull });
+					}
+				}
+			}
+		};
+		const at = x => x.map((value, i) => (value === null ? null : i - p.prd)).filter(i => i !== null && i >= 0);
+		scan(at(lows), s.l, true);
+		scan(at(highs), s.h, false);
+		return segs;
+	}
+
 	const customDefs = [
 		custom('squeeze', 'SQZMOM', 'Squeeze Momentum Indicator', '스퀴즈 모멘텀', 'squeeze momentum ttm 볼린저 켈트너 수축', 'LazyBear', false, 'price',
 			[length(20, 'BB 기간'), num('bbMult', 'BB 승수', 2, 0.1, 0.1), num('kc', 'KC 기간', 20), num('kcMult', 'KC 승수', 1.5, 0.1, 0.1)],
@@ -3027,32 +3057,7 @@ window.ChartDeskIndicators = (() => {
 				];
 				const highs = pivots(s.h, p.prd, p.prd, true);
 				const lows = pivots(s.l, p.prd, p.prd, false);
-				const segs = [];
-				// 새 피벗과 그 전의 피벗을 비교해, 가격과 반대로 움직인 지표 수를 센다. 두 점 사이를 봉이 가로지르면 버린다.
-				const scan = (points, price, bull) => {
-					for (let k = 1; k < points.length; k++) {
-						const a = points[k];
-						for (let m = k - 1; m >= 0 && a - points[m] <= p.bars; m--) {
-							const b = points[m];
-							for (const hidden of p.hidden >= 1 ? [false, true] : [false]) {
-								const priceOk = bull ? (hidden ? price[a] > price[b] : price[a] < price[b]) : (hidden ? price[a] < price[b] : price[a] > price[b]);
-								if (!priceOk) continue;
-								const count = oscillators.filter(x => x[a] !== null && x[b] !== null
-									&& (bull ? (hidden ? x[a] < x[b] : x[a] > x[b]) : (hidden ? x[a] > x[b] : x[a] < x[b]))).length;
-								if (count < p.min) continue;
-								let clear = true;
-								for (let j = b + 1; j < a && clear; j++) {
-									const onLine = price[b] + (price[a] - price[b]) * (j - b) / (a - b);
-									clear = bull ? s.l[j] >= onLine : s.h[j] <= onLine;
-								}
-								if (clear) segs.push({ a: b, pa: price[b], b: a, pb: price[a], color: bull ? 'up' : 'down', width: 2, dash: hidden ? [4, 3] : [], text: `${ count }`, textUp: !bull });
-							}
-						}
-					}
-				};
-				const at = x => x.map((value, i) => (value === null ? null : i - p.prd)).filter(i => i !== null && i >= 0);
-				scan(at(lows), s.l, true);
-				scan(at(highs), s.h, false);
+				const segs = scanDivergences(s, p, oscillators, highs, lows);
 				const pivot = highs.map((value, i) => value ?? lows[i]);
 				return { pivot, $signalSegs: segs, $draw: { segs: segs.slice(-60) } };
 			}, shapes({ signals: divergenceSignals() })),
@@ -3078,6 +3083,159 @@ window.ChartDeskIndicators = (() => {
 			}, { signals: squeezeSignals(true) }),
 	];
 	customDefs.push(...communityDefs);
+
+	// ---------- 불장단타왕: 공개 강의 내용을 바탕으로 만든 세트 ----------
+	const bool = (k, label, def = 1) => ({ ...num(k, label, def, 0), type: 'boolean' });
+	const bulldanRsiParams = [
+		bool('stageColors', '단계 색칠'),
+		num('rsiLen', 'RSI 기간', 14), num('os1', '과매도 1단계', 30, 0), num('os2', '과매도 2단계', 20, 0),
+		num('ob1', '과매수 1단계', 70, 0), num('ob2', '과매수 2단계', 80, 0),
+		bool('divergence', '다이버전스 표시'), num('prd', '다이버전스 피벗 좌우 봉 수', 5), num('divBars', '다이버전스 비교 봉 수', 100),
+	];
+	const bulldanParams = [
+		{ ...num('type', `이평 종류 (${ MA_TYPES })`, 1), options: [[1, 'SMA (코인)'], [2, 'EMA (주식)']] },
+		...[7, 25, 50, 100, 200].map(n => num(`ma${ n }`, `${ n }선 기간`, n)),
+		num('vwma', 'VWMA 기간', 100),
+		bool('showRsi', 'RSI 칸 표시'), bool('showProfile', '매물대 표시', 0), bool('showBoxes', '박스 격자 표시', 0), num('boxBars', '박스 몸통 범위 봉 수', 100, 2),
+		{ ...num('base', '기준 이평', 50), options: [[25, '25선'], [50, '50선'], [100, '100선'], [200, '200선'], [0, 'VWMA']], min: 0 },
+		bool('cycle', '사이클 필터'), bool('trap', '트랩 표시'), bool('pistol', '권총 표시'), bool('lshape', 'ㄴ자 표시'),
+		bool('oversold', '과매도 표시'), bool('pullback', '눌림 표시'), bool('wick', '꼬리 표시'), bool('breakout', '돌파 표시', 0),
+		bool('warnings', '경고 표시'), bool('short', '숏 신호 표시'),
+		num('trapLookback', '트랩 피벗 검색 봉 수', 60), num('left', '트랩 피벗 왼쪽 봉 수', 5), num('right', '트랩 피벗 오른쪽 봉 수', 2), num('strongBars', '강한 트랩 RSI 확인 봉 수', 3),
+		num('pistolLookback', '권총 급등 검색 봉 수', 30), num('pistolGap', '권총 급등 이격 (ATR 배수)', 3, 0, 0.1),
+		num('touch', '이평 터치 허용 %', 0.3, 0, 0.1), num('lLookback', 'ㄴ자 급락 검색 봉 수', 80), num('converge', 'ㄴ자 이평 수렴 %', 1.5, 0, 0.1),
+		num('retestBars', 'ㄴ자 올라탄 뒤 확인 봉 수', 10), num('crashGap', 'ㄴ자 급락 이격 (ATR 배수)', 3, 0, 0.1),
+		num('atrLen', '기본 ATR 기간', 14), num('atrFast', '수렴 단기 ATR 기간', 5), num('atrSlow', '수렴 장기 ATR 기간', 30),
+		num('squeezeRatio', '수렴 ATR 비율 미만', 0.8, 0.01, 0.05), num('riseBars', '저점 상승 비교 구간 봉 수', 4), num('slopeBars', '이평 기울기 비교 봉 수', 5),
+		num('volLen', '평균 거래량 기간', 20), num('oversoldVol', '과매도 거래량 배수', 2, 0, 0.1), num('volMult', '꼬리 거래량 배수', 3, 0, 0.1),
+		num('wickRatio', '아래꼬리 비율 이상', 0.5, 0, 0.1), num('pullbackMax', '같은 추세 눌림 최대 횟수', 2),
+		num('squeezeBars', '돌파 수렴·고점 비교 봉 수', 20, 2), num('chopBars', '횡보 교차 확인 봉 수', 20), num('chopCount', '횡보 교차 횟수 이상', 4),
+		...bulldanRsiParams,
+	];
+	const bulldanCounts = new Set(['ma7', 'ma25', 'ma50', 'ma100', 'ma200', 'vwma', 'boxBars', 'trapLookback', 'left', 'right', 'strongBars', 'pistolLookback', 'lLookback', 'retestBars', 'atrLen', 'atrFast', 'atrSlow', 'riseBars', 'slopeBars', 'volLen', 'pullbackMax', 'squeezeBars', 'chopBars', 'chopCount', 'rsiLen', 'prd', 'divBars']);
+	function bulldanSettings(params) {
+		const p = {};
+		for (const param of bulldanParams) {
+			const value = Number(params?.[param.k] ?? param.def);
+			p[param.k] = Number.isFinite(value) ? Math.max(param.min, value) : param.def;
+			if (bulldanCounts.has(param.k)) p[param.k] = Math.round(p[param.k]);
+		}
+		p.os1 = Math.min(100, p.os1); p.os2 = Math.min(p.os1, p.os2);
+		p.ob1 = Math.min(100, p.ob1); p.ob2 = Math.min(100, Math.max(p.ob1, p.ob2));
+		return p;
+	}
+	/** 실시간 차트에서는 마감 시각 전의 봉을 타점·피벗 확정에 사용하지 않는다. */
+	const bulldanClosed = (s, i, context) => !Number.isFinite(context?.closedBefore) || s.t[i] < context.closedBefore;
+	const bulldanMarkHits = (out, n, texts) => {
+		const hits = new Array(n).fill(false);
+		for (const mark of out.$signalMarks ?? []) if (texts.includes(mark.text)) hits[mark.i] = true;
+		return hits;
+	};
+	const bulldanEntries = [['trap', '트랩', '트랩★'], ['pistol', '권총'], ['lshape', 'ㄴ자'], ['oversold', '과매도', '과매도2'], ['pullback', '눌림'], ['wick', '꼬리'], ['breakout', '돌파']];
+	function bulldanCalc(s, params, context) {
+		const p = bulldanSettings(params), ma = {};
+		for (const n of [7, 25, 50, 100, 200]) ma[`ma${ n }`] = movingBy(p.type, s, s.c, p[`ma${ n }`]);
+		ma.vwma = volumeAverage(s, s.c, p.vwma);
+		const base = ma[p.base === 0 ? 'vwma' : `ma${ [25, 50, 100, 200].includes(p.base) ? p.base : 50 }`];
+		const strength = rsi(s.c, p.rsiLen), range = atr(s, p.atrLen), fast = atr(s, p.atrFast), slow = atr(s, p.atrSlow), vol = sma(s.v, p.volLen);
+		const lows = pivots(s.l, p.left, p.right, false), highs = pivots(s.h, p.left, p.right, true);
+		const marks = [], lowPoints = [], highPoints = [], usedLow = new Set(), usedHigh = new Set(), crosses = [];
+		let lastGap = -Infinity, lastCrash = -Infinity, lastCross = -Infinity, pistolUsed = false, lUsed = false, osUsed = false, wickUsed = false, pullCount = 0, touching = false, chopped = false, squeezeRun = 0;
+		const mark = (i, text, warning = false) => marks.push({ i, price: warning ? s.h[i] : s.l[i], dir: warning ? -1 : 1, text, color: warning ? '#9ca3af' : 'up' });
+		const minLow = (a, b) => { let value = Infinity; for (let j = Math.max(0, a); j <= b; j++) value = Math.min(value, s.l[j]); return value; };
+		for (let i = 0; i < s.n; i++) {
+			if (!bulldanClosed(s, i, context)) continue;
+			if (lows[i] !== null) lowPoints.push(i - p.right);
+			if (highs[i] !== null) highPoints.push(i - p.right);
+			while (lowPoints.length && i - lowPoints[0] > p.trapLookback) lowPoints.shift();
+			while (highPoints.length && i - highPoints[0] > p.trapLookback) highPoints.shift();
+			if (strength[i] !== null) {
+				const trap = lowPoints.findLast(at => !usedLow.has(at) && strength[at] !== null && s.l[i] < s.l[at] && s.c[i] > s.l[at] && strength[i] > strength[at]);
+				if (trap !== undefined) {
+					usedLow.add(trap);
+					if (p.trap) mark(i, strength.slice(Math.max(0, i - p.strongBars + 1), i + 1).some(value => value !== null && value <= p.os2) ? '트랩★' : '트랩');
+				}
+				const bull = highPoints.findLast(at => !usedHigh.has(at) && strength[at] !== null && s.h[i] > s.h[at] && s.c[i] < s.h[at] && strength[i] < strength[at]);
+				if (bull !== undefined) { usedHigh.add(bull); if (p.warnings && p.short) mark(i, '불트랩', true); }
+			}
+			const cycle = ma.ma50[i] !== null && ma.ma200[i] !== null && ma.ma50[i] > ma.ma200[i];
+			const trendAllowed = !p.cycle || cycle;
+			const squeeze = fast[i] !== null && slow[i] > 0 && fast[i] / slow[i] < p.squeezeRatio;
+			const slope = i >= p.slopeBars && base[i] !== null && base[i - p.slopeBars] !== null && base[i] > base[i - p.slopeBars];
+			const touch = base[i] !== null && s.l[i] <= base[i] * (1 + p.touch / 100) && s.c[i] > base[i];
+			if (range[i] > 0 && base[i] !== null && (s.h[i] - base[i]) / range[i] >= p.pistolGap) lastGap = i;
+			if (!squeeze) pistolUsed = false;
+			if (i >= 2 * p.riseBars - 1 && squeeze && minLow(i - p.riseBars + 1, i) > minLow(i - 2 * p.riseBars + 1, i - p.riseBars)
+				&& i - lastGap < p.pistolLookback && slope && touch && trendAllowed && !pistolUsed) {
+				pistolUsed = true; if (p.pistol) mark(i, '권총');
+			}
+			if ((ma.ma50[i] !== null && ma.ma200[i] !== null && ma.ma50[i] < ma.ma200[i]) || (ma.ma200[i] !== null && range[i] !== null && s.c[i] < ma.ma200[i] - p.crashGap * range[i])) lastCrash = i;
+			const trio = [ma.ma25[i], ma.ma50[i], ma.ma100[i]], valid = trio.every(value => value !== null), top = valid ? Math.max(...trio) : null;
+			const converged = valid && s.c[i] > 0 && (top - Math.min(...trio)) / s.c[i] <= p.converge / 100;
+			if (!converged || (valid && s.c[i] < Math.min(...trio))) lUsed = false;
+			if (i > 0 && valid && s.c[i] > top && [ma.ma25[i - 1], ma.ma50[i - 1], ma.ma100[i - 1]].every(value => value !== null)
+				&& s.c[i - 1] <= Math.max(ma.ma25[i - 1], ma.ma50[i - 1], ma.ma100[i - 1])) lastCross = i;
+			if (converged && i - lastCrash < p.lLookback && i > lastCross && i - lastCross <= p.retestBars && i >= p.slopeBars
+				&& ma.ma50[i - p.slopeBars] !== null && ma.ma50[i] >= ma.ma50[i - p.slopeBars] && s.l[i] <= top * (1 + p.touch / 100) && s.c[i] > top && !lUsed) {
+				lUsed = true; if (p.lshape) mark(i, 'ㄴ자');
+			}
+			const wick = s.h[i] > s.l[i] && (Math.min(s.o[i], s.c[i]) - s.l[i]) / (s.h[i] - s.l[i]) >= p.wickRatio;
+			if (strength[i] === null || strength[i] > p.os1) osUsed = false;
+			else if (!osUsed && s.c[i] > s.o[i] && (wick || (vol[i] > 0 && s.v[i] >= vol[i] * p.oversoldVol))) {
+				osUsed = true; if (p.oversold) mark(i, strength[i] <= p.os2 ? '과매도2' : '과매도');
+			}
+			if (base[i] !== null && s.c[i] < base[i]) { pullCount = 0; touching = false; }
+			if (touch && !touching && i > 0 && base[i - 1] !== null && s.c[i - 1] > base[i - 1] && slope && trendAllowed && s.v[i] < s.v[i - 1] && pullCount < p.pullbackMax) {
+				pullCount++; if (p.pullback) mark(i, '눌림');
+			}
+			touching = touch;
+			if (ma.ma25[i] !== null && s.c[i] > ma.ma25[i]) wickUsed = false;
+			if (!wickUsed && ma.ma25[i] !== null && s.c[i] < ma.ma25[i] && vol[i] > 0 && s.v[i] >= vol[i] * p.volMult && wick) {
+				wickUsed = true; if (p.wick) mark(i, '꼬리');
+			}
+			if (p.breakout && squeezeRun >= p.squeezeBars && i >= p.squeezeBars && trendAllowed && s.c[i] > s.o[i] && ma.vwma[i] !== null && s.c[i] > ma.vwma[i]) {
+				const start = i - p.squeezeBars, middle = start + Math.floor(p.squeezeBars / 2);
+				let high = -Infinity; for (let j = start; j < i; j++) high = Math.max(high, s.h[j]);
+				if (s.c[i] > high && minLow(middle, i - 1) > minLow(start, middle - 1)) mark(i, '돌파');
+			}
+			squeezeRun = squeeze ? squeezeRun + 1 : 0;
+			if (p.warnings && cycle && strength[i] !== null && strength[i] >= p.ob2 && i > 0 && strength[i - 1] !== null && strength[i - 1] < p.ob2) mark(i, '숏주의', true);
+			crosses.push(Number(crossUp(s.c, ma.ma25, i) || crossDown(s.c, ma.ma25, i)) + Number(crossUp(s.c, ma.ma50, i) || crossDown(s.c, ma.ma50, i)));
+			const chop = i >= p.chopBars - 1 && crosses.slice(-p.chopBars).reduce((a, b) => a + b, 0) >= p.chopCount;
+			if (chop && !chopped && p.warnings) mark(i, '횡보', true);
+			chopped = chop;
+		}
+		const segs = [];
+		if (p.showBoxes && s.n >= 2) {
+			const end = s.n - 1, start = Math.max(0, s.n - p.boxBars);
+			let low = Infinity, high = -Infinity;
+			for (let i = start; i <= end; i++) { low = Math.min(low, s.o[i], s.c[i]); high = Math.max(high, s.o[i], s.c[i]); }
+			if (high > low) for (const level of [-3, -2, -1, 0, 0.5, 1, 2, 3, 4]) segs.push({ a: start, b: end, pa: low + level * (high - low), pb: low + level * (high - low), color: level === 0.5 ? '#4b5563' : '#9ca3af', dash: [4, 4] });
+		}
+		return { ...ma, $signalMarks: marks, $draw: { marks: marks.slice(-300), segs } };
+	}
+	function bulldanRsiCalc(s, params, context) {
+		const p = bulldanSettings(params), value = rsi(s.c, p.rsiLen);
+		const highs = pivots(s.h, p.prd, p.prd, true), lows = pivots(s.l, p.prd, p.prd, false);
+		for (let i = 0; i < s.n; i++) if (!bulldanClosed(s, i, context)) { highs[i] = null; lows[i] = null; }
+		const segs = p.divergence ? scanDivergences(s, { prd: p.prd, bars: p.divBars, min: 1, hidden: 0 }, [value], highs, lows) : [];
+		return { rsi: value, $closed: value.map((_, i) => bulldanClosed(s, i, context)), $colors: { rsi: value.map(v => !p.stageColors || v === null ? null : v <= p.os2 ? '#1d4ed8' : v <= p.os1 ? '#3b82f6' : v >= p.ob2 ? '#b91c1c' : v >= p.ob1 ? '#ef4444' : '#9ca3af') },
+			$signalSegs: segs, $draw: { segs: segs.slice(-60).map(seg => ({ ...seg, pa: value[seg.a], pb: value[seg.b], text: '', color: seg.color === 'up' ? '#22c55e' : '#ef4444' })) } };
+	}
+	customDefs.unshift(
+		custom('bulldan', '불장단타왕', 'Bulldan Trading Set', '불장단타왕', '불장 단타왕 이평 rsi 트랩 권총 눌림', '불장단타왕 공개 강의', true, 'price', bulldanParams,
+			[...[7, 25, 50, 100, 200].map((n, i) => line(`ma${ n }`, `${ n }선`, ['#a855f7', '#f97316', '#22c55e', '#38bdf8', '#ef4444'][i], { width: n === 50 || n === 200 ? 2 : 1 })), line('vwma', 'VWMA', '#e5e7eb')], bulldanCalc,
+			shapes({ group: 'personal', compactLegend: true, companions: [['showRsi', 'bulldanRsi'], ['showProfile', 'vpsr']], signals: bulldanEntries.map(([id, ...texts]) => [id, `불장단타왕: ${ texts[0] } 매수`, (out, s) => bulldanMarkHits(out, s.n, texts)]) })),
+		custom('bulldanRsi', '불장단타왕 RSI (세트)', 'Bulldan RSI', '불장단타왕 RSI', '불장 rsi 다이버전스', '불장단타왕 공개 강의', false, 'osc', bulldanRsiParams,
+			[line('rsi', 'RSI', '#9ca3af', { width: 2 })], bulldanRsiCalc, shapes({ group: 'personal', setOnly: true, compactLegend: true, paneDraw: true, levels: params => {
+				const p = bulldanSettings(params);
+				return [p.os2, p.os1, p.ob1, p.ob2];
+			}, signals: [
+				...[[ 'os1', '과매도 1단계 진입', true ], [ 'os2', '과매도 2단계 진입', true ], [ 'ob1', '과매수 1단계 진입', false ], [ 'ob2', '과매수 2단계 진입', false ]].map(([id, label, low]) => [id, label, (out, s, params) => {
+					const p = bulldanSettings(params), level = p[id];
+					return out.rsi.map((v, i) => out.$closed?.[i] !== false && i > 0 && v !== null && out.rsi[i - 1] !== null && (low ? v <= level && out.rsi[i - 1] > level : v >= level && out.rsi[i - 1] < level));
+				}]), ...divergenceSignals().slice(0, 2).map(([id, label, fn]) => [id, label, (out, s, p) => fn(out, s, bulldanSettings(p))]),
+			] })));
 
 	function source(bars) {
 		const s = { n: bars.length, t: [], o: [], h: [], l: [], c: [], v: [], hl2: [], hlc3: [] };

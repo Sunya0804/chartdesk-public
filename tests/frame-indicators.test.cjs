@@ -65,7 +65,7 @@ test('실제 FVG·채널·B 돌파는 4시간 차트와 같은 시간·가격에
 	pane.cfg = { symbol: 'TEST', interval: '1h' };
 	pane.bars = frame.flatMap(bar => Array.from({ length: 4 }, (_, i) => ({ ...bar, time: bar.time + i * 3600 }))).slice(201);
 	const indexAt = i => i * 4 - 201;
-	for (const id of ['fvg', 'srchannel', 'tlbreaks', 'liqswings', 'divs', 'ict', 'wonyo']) {
+	for (const id of ['fvg', 'srchannel', 'tlbreaks', 'liqswings', 'divs', 'ict', 'wonyo', 'bulldan', 'bulldanRsi']) {
 		const ind = indicator(IND.byId.get(id), id === 'fvg' ? { threshold: 0.1, mitigated: 1, count: 1000 } : {});
 		const high = ind.def.calc(IND.source(frame), ind.cfg.params, { interval: '4h', tzOffset: 0, info: {} });
 		const low = pane.computeOnFrame(ind, '4h', {}).$draw;
@@ -92,7 +92,7 @@ test('실제 FVG·채널·B 돌파는 4시간 차트와 같은 시간·가격에
 test('주기 선택은 작도·shift 지표에 열리고 매물대만 제외한다', () => {
 	const { ctx, pane, IND } = setup(data(50));
 	pane.cfg = { symbol: 'TEST', interval: '1h' };
-	for (const id of ['fvg', 'srchannel', 'tlbreaks', 'liqswings', 'divs', 'ict', 'wonyo', 'srbreaks', 'ichimoku']) {
+	for (const id of ['fvg', 'srchannel', 'tlbreaks', 'liqswings', 'divs', 'ict', 'wonyo', 'srbreaks', 'ichimoku', 'bulldan', 'bulldanRsi']) {
 		const def = IND.byId.get(id); if (!def) continue;
 		assert.equal(pane.frameOf(indicator(def)), '4h', id);
 	}
@@ -109,4 +109,17 @@ test('주기 선택은 작도·shift 지표에 열리고 매물대만 제외한�
 	ctx.anchor = {}; ctx.pane = { styleOf: () => ({}) };
 	vm.runInContext("openIndicatorSettings(anchor,pane,'fvg')", ctx);
 	assert.ok(all(rows, node => node.tag === 'option' && node.value === '4h').length);
+});
+
+test('불장단타왕 상위 주기 계산은 상위 봉 마감 경계를 전달한다', () => {
+	const frame = data(100), { pane, IND } = setup(frame);
+	pane.cfg = { symbol: 'TEST', interval: '1h' };
+	pane.bars = frame.flatMap(bar => Array.from({ length: 4 }, (_, i) => ({ ...bar, time: bar.time + i * 3600 })));
+	const def = IND.byId.get('bulldan');
+	let passed;
+	const ind = indicator({ ...def, calc: (s, p, context) => { passed = context; return def.calc(s, p, context); } });
+	const now = frame[99].time + 3600;
+	pane.computeOnFrame(ind, '4h', { closedBefore: now - 3600 });
+	assert.equal(passed.closedBefore, now - 14400);
+	assert.equal(passed.interval, '4h');
 });

@@ -29,7 +29,7 @@ function hits(id, kind, out, n, params = {}) {
 }
 
 test('신호 목록·정리·설명·AI 카탈로그', () => {
-	assert.equal(RULES.signalDefs().length, 32);
+	assert.equal(RULES.signalDefs().length, 34);
 	for (const type of [...Object.keys(colors), 'bbrsi', 'tma', 'srbreaks', 'tlbreaks', 'twinrf', 'slingshot', 'cipherb', 'cmmacd', 'squeeze', 'sqzpro', 'wae', 'fvg', 'divs', 'impulse']) {
 		assert.ok(RULES.signalDefs().some(def => def.id === type), type);
 	}
